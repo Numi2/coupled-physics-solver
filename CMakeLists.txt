@@ -221,6 +221,8 @@ if(BUILD_TESTING)
         COMMAND $<TARGET_FILE:coupled_matter_physics_probe> --heterogeneous-fem)
     add_test(NAME coupled.matter.heterogeneous_multiphysics
         COMMAND $<TARGET_FILE:coupled_matter_physics_probe> --heterogeneous-multiphysics)
+    add_test(NAME coupled.matter.heterogeneous_mutation
+        COMMAND $<TARGET_FILE:coupled_matter_physics_probe> --heterogeneous-puncture-mutation)
     add_test(NAME coupled.suture.tissue_coupling
         COMMAND $<TARGET_FILE:coupled_suture_handoff_probe> --tissue-coupling-only)
     add_test(NAME coupled.suture.perfused_tissue_coupling
@@ -237,6 +239,7 @@ if(BUILD_TESTING)
         coupled.matter.metal_world
         coupled.matter.heterogeneous_fem
         coupled.matter.heterogeneous_multiphysics
+        coupled.matter.heterogeneous_mutation
         coupled.suture.tissue_coupling
         coupled.suture.perfused_tissue_coupling
         coupled.evidence.trial_contract

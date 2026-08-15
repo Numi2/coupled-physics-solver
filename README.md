@@ -56,14 +56,21 @@ numi coupled-profile --mode perfused
 numi coupled-profile --mode coupled-perfused
 numi coupled-profile --mode heterogeneous
 numi coupled-profile --mode heterogeneous-mixed
+numi coupled-profile --mode heterogeneous-mutation
 ```
 
 Heterogeneous FEM tetrahedra may own distinct passive constitutive materials
 and densities while the object material owns external contact. Mixed-field
 heterogeneous elements additionally own their transport, activation, fibre,
 and active-stress coefficients. They must share the nodal pressure scale (bulk
-modulus and thermal expansion). The compiler still rejects heterogeneous
-mutable topology until every mutation transaction preserves material identity.
+modulus and thermal expansion). Heterogeneous mutable topology retains the
+per-tetrahedron constitutive owner: splits copy the source owner, flips and
+collapses cannot cross a material interface, and cross-material smoothing is
+rejected transactionally. The focused heterogeneous-mutation probe executes a
+two-material cylindrical puncture and gates active/eroded material counts plus
+per-material density accounting. This does not yet qualify the full four-layer
+surgical puncture sequence.
+
 The perfused probe executes the four-layer path on Metal with synthetic,
 provenance-shaped fixtures. It also gates every state-free layer's compiled
 passive and mixed pressure/pore-pressure/active-fibre stress and mechanical
@@ -72,8 +79,8 @@ directional-difference check. This is a constitutive-point parity boundary,
 not a full-step FP64 oracle. The `coupled-perfused` mode connects that same
 heterogeneous, active-field tissue directly to live DER strand contact through
 the hard needle swage. It deliberately disables puncture mutation until
-mutation can preserve per-tetrahedron material identity. Both modes prove
-execution and replay, not ex-vivo calibration or indistinguishable
+the four-layer needle/channel sequence is independently qualified. Both modes
+prove execution and replay, not ex-vivo calibration or indistinguishable
 visual/physical fidelity.
 
 Promotion remains gated by exact replay, FP64 parity, physical outcomes, zero

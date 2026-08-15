@@ -1034,15 +1034,12 @@ CompileResult compileWorld(
                 );
             }
         }
-        if (heterogeneousFEM && object.mutationPolicy.enabled) {
-            result.diagnostics.push_back({
-                Diagnostic::Severity::error, 0u, 0u,
-                "heterogeneous FEM object '" + object.name +
-                    "' cannot enable topology mutation until material "
-                    "ownership is routed through every mutation transaction",
-            });
-            return result;
-        }
+        // Mutable tetrahedra retain identity.x as their constitutive owner.
+        // The device transaction copies that identity on edge splits, admits
+        // flips only within one material, and rejects a collapse/smoothing
+        // cavity that crosses an interface. Erosion and puncture only change
+        // activity/generation bits, so heterogeneous ownership remains
+        // explicit across commit and rollback.
         if (heterogeneousFEM &&
             (object.mixedFEM || object.multiphysics.enabled)) {
             const nm_float4 referenceMechanics =

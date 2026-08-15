@@ -710,6 +710,72 @@ numi::matter::CompiledWorld compilePunctureMutationCase() {
     return std::move(compiled.world);
 }
 
+numi::matter::CompiledWorld compileHeterogeneousPunctureMutationCase() {
+    const auto parsed = numi::matter::parseMatterFile(NUMI_MATTER_MATERIAL);
+    require(parsed.succeeded(),
+        "heterogeneous puncture oracle material did not parse");
+    auto firstMaterial = parsed.material;
+    auto secondMaterial = parsed.material;
+    firstMaterial.name = "heterogeneous_puncture_first";
+    secondMaterial.name = "heterogeneous_puncture_second";
+    for (auto& parameter : firstMaterial.parameters) {
+        if (parameter.name == "density") parameter.defaultValue = 900.0;
+    }
+    for (auto& parameter : secondMaterial.parameters) {
+        if (parameter.name == "density") parameter.defaultValue = 1200.0;
+    }
+
+    numi::matter::WorldSource source;
+    source.environmentCount = 1u;
+    source.frameTimestep = 1.0 / 240.0;
+    source.gravity = {0.0, 0.0, 0.0};
+    source.mixedSolver.newtonIterations = 2u;
+    source.materials.push_back(std::move(firstMaterial));
+    source.materials.push_back(std::move(secondMaterial));
+    numi::matter::ObjectSource object;
+    object.name = "heterogeneous_puncture_two_tet";
+    object.materialIndex = 0u;
+    object.representation = numi::matter::Representation::fem;
+    object.mixedFEM = false;
+    object.characteristicLength = 0.1;
+    object.femNodes = {
+        {-0.1, -0.1, 0.0}, {0.1, -0.1, 0.0},
+        {-0.1, 0.1, 0.0}, {-0.1, -0.1, 0.2},
+        {0.9, -0.1, 0.0}, {1.1, -0.1, 0.0},
+        {0.9, 0.1, 0.0}, {0.9, -0.1, 0.2},
+    };
+    numi::matter::TetrahedronSource first;
+    first.nodes = {0u, 1u, 2u, 3u};
+    first.materialIndex = 0u;
+    numi::matter::TetrahedronSource second;
+    second.nodes = {4u, 5u, 6u, 7u};
+    second.materialIndex = 1u;
+    object.tetrahedra = {first, second};
+    object.mutationPolicy.enabled = true;
+    object.femCapacity.punctureChannels = 1u;
+    object.femCapacity.mutationCommands = 1u;
+    numi::matter::MutationCommandSource command;
+    command.kind = NM_MUTATION_CYLINDER_PUNCTURE;
+    command.stableIdentifier = 79u;
+    command.controlStep = 0u;
+    command.geometry0 = {0.0, 0.0, 1.0, 0.25};
+    command.geometry1 = {0.0, 0.0, 0.1, 0.5};
+    object.mutationCommands.push_back(command);
+    source.objects.push_back(std::move(object));
+    auto compiled = numi::matter::compileWorld(source);
+    std::string failure =
+        "heterogeneous puncture mutation world did not compile";
+    for (const auto& diagnostic : compiled.diagnostics) {
+        failure += "; " + diagnostic.message;
+    }
+    require(compiled.succeeded(), failure);
+    require(compiled.world.fem.tetrahedra.size() == 2u &&
+            compiled.world.fem.tetrahedra[0].identity.x == 0u &&
+            compiled.world.fem.tetrahedra[1].identity.x == 1u,
+        "heterogeneous puncture compile lost element material identity");
+    return std::move(compiled.world);
+}
+
 numi::matter::CompiledWorld compilePoroelasticCompressionCase() {
     auto parsed = numi::matter::parseMatterFile(NUMI_MATTER_MATERIAL);
     require(parsed.succeeded(), "poroelastic material did not parse");
@@ -1180,6 +1246,8 @@ struct Outcome {
     float maximumActivation = 0.0f;
     float maximumElectricPotential = -std::numeric_limits<float>::infinity();
     std::uint32_t activeTetrahedra = 0u;
+    std::array<std::uint32_t, 4> activeMaterialTetrahedra{};
+    std::array<std::uint32_t, 4> erodedMaterialTetrahedra{};
     std::uint32_t activeTopologyNodes = 0u;
     std::uint32_t separatedFaces = 0u;
     std::uint32_t activeChannels = 0u;
@@ -2478,10 +2546,24 @@ Outcome runCase(
                 );
             }
             outcome.activeTetrahedra = 0u;
+            outcome.activeMaterialTetrahedra = {};
+            outcome.erodedMaterialTetrahedra = {};
             for (const NMTetrahedronGPU& tetrahedron :
                  snapshot.femTopologyTetrahedra) {
-                outcome.activeTetrahedra +=
+                const bool active =
                     (tetrahedron.identity.w & NM_OBJECT_ACTIVE) != 0u;
+                outcome.activeTetrahedra += active;
+                if (tetrahedron.identity.x <
+                    outcome.activeMaterialTetrahedra.size()) {
+                    if (active) {
+                        ++outcome.activeMaterialTetrahedra[
+                            tetrahedron.identity.x];
+                    } else if ((tetrahedron.identity.w &
+                                NM_TOPOLOGY_ERODED) != 0u) {
+                        ++outcome.erodedMaterialTetrahedra[
+                            tetrahedron.identity.x];
+                    }
+                }
             }
             outcome.activeTopologyNodes = 0u;
             for (const NMFEMTopologyNodeGPU& node : snapshot.femTopologyNodes)
@@ -2786,6 +2868,9 @@ int main(int argc, const char* argv[]) {
             std::string_view(argv[1]) == "--small-scale-remesh";
         const bool punctureMutation = argc == 2 &&
             std::string_view(argv[1]) == "--puncture-mutation";
+        const bool heterogeneousPunctureMutation = argc == 2 &&
+            std::string_view(argv[1]) ==
+                "--heterogeneous-puncture-mutation";
         const bool learnedMaterial = argc == 2 &&
             std::string_view(argv[1]) == "--learned-material";
         const bool productionRollback = argc == 2 &&
@@ -2813,7 +2898,8 @@ int main(int argc, const char* argv[]) {
                 mpmSingleContact || mpmGentle || mpmBatch || mpmRollback ||
                 metalWorldCoupling || multiphysics ||
                 topologyMutation || topologyRollback || cohesiveMutation ||
-                smallScaleRemesh || punctureMutation || learnedMaterial ||
+                smallScaleRemesh || punctureMutation ||
+                heterogeneousPunctureMutation || learnedMaterial ||
                 productionRollback || poroelasticCompression ||
                 articulatedFootPad ||
                 articulatedFootPadSequence ||
@@ -2821,7 +2907,7 @@ int main(int argc, const char* argv[]) {
                 adaptivePromotion || adaptivePromotionRollback || femFree ||
                 femHighRate || femHighDrop || heterogeneousFEM ||
                 heterogeneousMultiphysics,
-            "usage: metalrobo_matter_physics_probe [--poroelastic-compression|--articulated-foot-pad|--articulated-foot-pad-sequence|--mixed|--multiphysics|--topology-mutation|--topology-rollback|--cohesive-mutation|--small-scale-remesh|--puncture-mutation|--learned-material|--production-rollback|--stateful-mpm|--stateful-fem|--mpm|--mpm-free|--mpm-single|--mpm-single-contact|--mpm-gentle-contact|--mpm-batch|--mpm-rollback|--metal-world-coupling|--identification|--adaptive-demotion|--adaptive-promotion|--adaptive-promotion-rollback|--fem|--fem-free|--fem-high-rate|--fem-high-drop|--heterogeneous-fem|--heterogeneous-multiphysics]"
+            "usage: metalrobo_matter_physics_probe [--poroelastic-compression|--articulated-foot-pad|--articulated-foot-pad-sequence|--mixed|--multiphysics|--topology-mutation|--topology-rollback|--cohesive-mutation|--small-scale-remesh|--puncture-mutation|--heterogeneous-puncture-mutation|--learned-material|--production-rollback|--stateful-mpm|--stateful-fem|--mpm|--mpm-free|--mpm-single|--mpm-single-contact|--mpm-gentle-contact|--mpm-batch|--mpm-rollback|--metal-world-coupling|--identification|--adaptive-demotion|--adaptive-promotion|--adaptive-promotion-rollback|--fem|--fem-free|--fem-high-rate|--fem-high-drop|--heterogeneous-fem|--heterogeneous-multiphysics]"
         );
         if (articulatedFootPad) {
             runArticulatedFootPadScene();
@@ -3035,6 +3121,56 @@ int main(int argc, const char* argv[]) {
                 << ",\"active_channels\":" << outcome.activeChannels
                 << ",\"removed_mass\":" << outcome.removedMass
                 << "}\n";
+        }
+        if (heterogeneousPunctureMutation) {
+            const auto world = compileHeterogeneousPunctureMutationCase();
+            const double expectedRemovedMass =
+                static_cast<double>(world.materials[0].bulk.x) *
+                static_cast<double>(world.fem.tetrahedra[0]
+                    .inverseRestRow0.w);
+            const auto outcome = runCase(
+                world, "heterogeneous puncture mutation",
+                false, false, 1u
+            );
+            const double removalRelativeError = std::abs(
+                static_cast<double>(outcome.removedMass) -
+                expectedRemovedMass
+            ) / expectedRemovedMass;
+            require(outcome.activeTetrahedra == 1u &&
+                    outcome.activeChannels == 1u &&
+                    outcome.activeMaterialTetrahedra[0] == 0u &&
+                    outcome.activeMaterialTetrahedra[1] == 1u &&
+                    outcome.erodedMaterialTetrahedra[0] == 1u &&
+                    outcome.erodedMaterialTetrahedra[1] == 0u &&
+                    removalRelativeError <= 2.0e-6,
+                "heterogeneous puncture did not preserve per-tetrahedron "
+                "material identity and density accounting: active=" +
+                    std::to_string(outcome.activeTetrahedra) +
+                    " active_material=" +
+                    std::to_string(outcome.activeMaterialTetrahedra[0]) +
+                    "/" +
+                    std::to_string(outcome.activeMaterialTetrahedra[1]) +
+                    " eroded_material=" +
+                    std::to_string(outcome.erodedMaterialTetrahedra[0]) +
+                    "/" +
+                    std::to_string(outcome.erodedMaterialTetrahedra[1]) +
+                    " channels=" + std::to_string(outcome.activeChannels) +
+                    " removal_relative_error=" +
+                    std::to_string(removalRelativeError));
+            std::cout
+                << "{\"schema\":\"numi.matter.physics-probe.v3\""
+                << ",\"representation\":\"heterogeneous_cylindrical_puncture\""
+                << ",\"active_material_tetrahedra\":["
+                << outcome.activeMaterialTetrahedra[0] << ','
+                << outcome.activeMaterialTetrahedra[1] << ']'
+                << ",\"eroded_material_tetrahedra\":["
+                << outcome.erodedMaterialTetrahedra[0] << ','
+                << outcome.erodedMaterialTetrahedra[1] << ']'
+                << ",\"active_channels\":" << outcome.activeChannels
+                << ",\"removed_mass\":" << outcome.removedMass
+                << ",\"removed_mass_relative_error\":"
+                << removalRelativeError
+                << ",\"failed_steps\":0}\n";
         }
         if (learnedMaterial) {
             const auto world = compileCase(
@@ -3260,6 +3396,7 @@ int main(int argc, const char* argv[]) {
             !multiphysics &&
             !topologyMutation && !topologyRollback && !cohesiveMutation &&
             !smallScaleRemesh && !punctureMutation &&
+            !heterogeneousPunctureMutation &&
             !learnedMaterial &&
             !productionRollback &&
             !poroelasticCompression &&
@@ -3324,6 +3461,7 @@ int main(int argc, const char* argv[]) {
             !multiphysics &&
             !topologyMutation && !topologyRollback && !cohesiveMutation &&
             !smallScaleRemesh && !punctureMutation &&
+            !heterogeneousPunctureMutation &&
             !learnedMaterial &&
             !productionRollback &&
             !poroelasticCompression &&
