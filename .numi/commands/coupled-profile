@@ -1,0 +1,217 @@
+#!/bin/sh
+
+set -eu
+
+if [ "${1:-}" = "--numi-describe" ]; then
+    printf '%s\n' \
+        "Profile standalone coupled physics with exact replay and Metal evidence."
+    exit 0
+fi
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    printf '%s\n' \
+        "Usage: numi coupled-profile [--mode metal4|tissue] [--build-dir PATH] [--artifact-dir PATH] [--no-build] [--timeline-only]" \
+        "" \
+        "Runs the selected probe twice, requires exact normalized replay, records" \
+        "a Metal System Trace, exports GPU/error/counter tables, and attempts the" \
+        "headless detailed-counter profile unless --timeline-only is selected." \
+        "Counter unavailability is recorded and exits 4; it is never inferred."
+    exit 0
+fi
+
+profile_root=${NUMI_WORKSPACE_ROOT:-}
+if [ -z "$profile_root" ]; then
+    profile_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+fi
+profile_mode=metal4
+profile_build=${NUMI_COUPLED_BUILD_DIR:-"$profile_root/build-coupled-profile"}
+profile_artifact=${NUMI_COUPLED_ARTIFACT_DIR:-}
+profile_build_enabled=1
+profile_timeline_only=0
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --mode)
+            shift
+            [ "$#" -gt 0 ] || { printf '%s\n' "--mode requires a value" >&2; exit 2; }
+            profile_mode=$1
+            ;;
+        --build-dir)
+            shift
+            [ "$#" -gt 0 ] || { printf '%s\n' "--build-dir requires a path" >&2; exit 2; }
+            profile_build=$1
+            ;;
+        --artifact-dir)
+            shift
+            [ "$#" -gt 0 ] || { printf '%s\n' "--artifact-dir requires a path" >&2; exit 2; }
+            profile_artifact=$1
+            ;;
+        --no-build) profile_build_enabled=0 ;;
+        --timeline-only) profile_timeline_only=1 ;;
+        *) printf '%s\n' "unknown option: $1" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+case "$profile_mode" in
+    metal4)
+        profile_target=coupled_metal4_execution_probe
+        profile_argument=
+        profile_gate='Metal 4 ownership contract; not physical fidelity'
+        ;;
+    tissue)
+        profile_target=coupled_suture_handoff_probe
+        profile_argument=--tissue-coupling-only
+        profile_gate='simulated tissue-suture coupling regression; not measured calibration'
+        ;;
+    *) printf '%s\n' "mode must be metal4 or tissue" >&2; exit 2 ;;
+esac
+
+if [ -z "$profile_artifact" ]; then
+    profile_timestamp=$(date -u '+%Y%m%dT%H%M%SZ')
+    profile_artifact="$profile_root/.numi/runs/coupled-profile-$profile_mode-$profile_timestamp"
+fi
+[ ! -e "$profile_artifact" ] || {
+    printf '%s\n' "artifact path already exists: $profile_artifact" >&2
+    exit 2
+}
+
+profile_cmake=$(command -v cmake || true)
+if [ -z "$profile_cmake" ] && [ -x /opt/homebrew/bin/cmake ]; then
+    profile_cmake=/opt/homebrew/bin/cmake
+fi
+[ -n "$profile_cmake" ] || { printf '%s\n' "cmake is unavailable" >&2; exit 2; }
+command -v xcrun >/dev/null 2>&1 || { printf '%s\n' "xcrun is unavailable" >&2; exit 2; }
+
+mkdir -p "$profile_artifact/exports"
+profile_summary="$profile_artifact/summary.txt"
+profile_revision=$(git -C "$profile_root" rev-parse HEAD)
+profile_branch=$(git -C "$profile_root" branch --show-current)
+[ -n "$profile_branch" ] || profile_branch=detached
+profile_status=$(git -C "$profile_root" status --porcelain=v1)
+{
+    printf 'revision=%s\n' "$profile_revision"
+    printf 'branch=%s\n' "$profile_branch"
+    printf 'mode=%s\n' "$profile_mode"
+    printf 'evidence_boundary=%s\n' "$profile_gate"
+    printf 'worktree_clean=%s\n' "$([ -z "$profile_status" ] && printf yes || printf no)"
+    sw_vers | tr '\n' ' '
+    printf '\n'
+} > "$profile_summary"
+if [ -n "$profile_status" ]; then
+    printf '%s\n' "$profile_status" > "$profile_artifact/worktree-status.txt"
+fi
+system_profiler SPHardwareDataType SPDisplaysDataType > "$profile_artifact/device.txt"
+
+if [ "$profile_build_enabled" -eq 1 ]; then
+    "$profile_cmake" -S "$profile_root" -B "$profile_build" -DCMAKE_BUILD_TYPE=Release
+    "$profile_cmake" --build "$profile_build" --target "$profile_target" --parallel "${NUMI_COUPLED_BUILD_JOBS:-8}"
+fi
+profile_probe="$profile_build/bin/$profile_target"
+[ -x "$profile_probe" ] || { printf '%s\n' "probe unavailable: $profile_probe" >&2; exit 2; }
+
+shasum -a 256 "$profile_probe" > "$profile_artifact/runtime-sha256.txt"
+for profile_binary in \
+    "$profile_build/shaders/CoupledPhysics.metallib" \
+    "$profile_build/matter/shaders/NumiMatter.metallib"; do
+    if [ -f "$profile_binary" ]; then
+        shasum -a 256 "$profile_binary" >> "$profile_artifact/runtime-sha256.txt"
+    fi
+done
+
+profile_run() {
+    profile_name=$1
+    if [ -n "$profile_argument" ]; then
+        "$profile_probe" "$profile_argument" \
+            > "$profile_artifact/$profile_name.stdout" \
+            2> "$profile_artifact/$profile_name.stderr"
+    else
+        "$profile_probe" \
+            > "$profile_artifact/$profile_name.stdout" \
+            2> "$profile_artifact/$profile_name.stderr"
+    fi
+    sed -E 's/(reference_gpu_ms|coupled_gpu_ms|gpu_ms)=[^ ]+[ ]*//g' \
+        "$profile_artifact/$profile_name.stdout" \
+        > "$profile_artifact/$profile_name.normalized"
+}
+
+profile_run replay-a
+profile_run replay-b
+cmp "$profile_artifact/replay-a.normalized" "$profile_artifact/replay-b.normalized"
+shasum -a 256 "$profile_artifact/replay-a.normalized" > "$profile_artifact/replay.sha256"
+if [ "$profile_mode" = tissue ]; then
+    grep -q 'tissue_suture_coupling=ok' "$profile_artifact/replay-a.stdout"
+    grep -q 'failed_steps=0' "$profile_artifact/replay-a.stdout"
+fi
+
+profile_trace="$profile_artifact/coupled.trace"
+if [ -n "$profile_argument" ]; then
+    xcrun xctrace record --template "Metal System Trace" --no-prompt \
+        --target-stdout "$profile_artifact/trace-target.stdout" \
+        --output "$profile_trace" --launch -- \
+        "$profile_probe" "$profile_argument" \
+        > "$profile_artifact/xctrace-record.log" 2>&1
+else
+    xcrun xctrace record --template "Metal System Trace" --no-prompt \
+        --target-stdout "$profile_artifact/trace-target.stdout" \
+        --output "$profile_trace" --launch -- "$profile_probe" \
+        > "$profile_artifact/xctrace-record.log" 2>&1
+fi
+xcrun xctrace export --input "$profile_trace" --toc \
+    --output "$profile_artifact/exports/toc.xml"
+grep -q 'return-exit-status="0"' "$profile_artifact/exports/toc.xml"
+for profile_schema in \
+    metal-gpu-intervals metal-command-buffer-error gpu-counter-info; do
+    xcrun xctrace export --input "$profile_trace" \
+        --xpath "/trace-toc/run[@number=\"1\"]/data/table[@schema=\"$profile_schema\"]" \
+        --output "$profile_artifact/exports/$profile_schema.xml"
+done
+profile_gpu_rows=$(grep -o '<row' "$profile_artifact/exports/metal-gpu-intervals.xml" | wc -l | tr -d ' ')
+profile_error_rows=$(grep -o '<row' "$profile_artifact/exports/metal-command-buffer-error.xml" | wc -l | tr -d ' ')
+[ "$profile_gpu_rows" -gt 0 ]
+[ "$profile_error_rows" -eq 0 ]
+{
+    printf 'replay_sha256=%s\n' "$(awk '{print $1}' "$profile_artifact/replay.sha256")"
+    printf 'metal_gpu_rows=%s\n' "$profile_gpu_rows"
+    printf 'metal_command_buffer_errors=%s\n' "$profile_error_rows"
+    printf 'timeline_status=passed\n'
+} >> "$profile_summary"
+
+if [ "$profile_timeline_only" -eq 1 ]; then
+    printf 'performance_counter_status=not_claimed\n' >> "$profile_summary"
+    printf 'timeline and replay passed: %s\n' "$profile_artifact"
+    exit 0
+fi
+
+profile_counter_trace="$profile_artifact/coupled-gpu-counters.trace"
+set +e
+if [ -n "$profile_argument" ]; then
+    xcrun xctrace record --template "Metal System Trace" \
+        --instrument "Metal GPU Counters" --no-prompt \
+        --target-stdout "$profile_artifact/counter-target.stdout" \
+        --output "$profile_counter_trace" --launch -- \
+        "$profile_probe" "$profile_argument" \
+        > "$profile_artifact/xctrace-counter-record.log" 2>&1
+else
+    xcrun xctrace record --template "Metal System Trace" \
+        --instrument "Metal GPU Counters" --no-prompt \
+        --target-stdout "$profile_artifact/counter-target.stdout" \
+        --output "$profile_counter_trace" --launch -- "$profile_probe" \
+        > "$profile_artifact/xctrace-counter-record.log" 2>&1
+fi
+profile_counter_exit=$?
+set -e
+if [ "$profile_counter_exit" -ne 0 ]; then
+    printf 'performance_counter_status=record_failed\n' >> "$profile_summary"
+    printf 'timeline passed; detailed counters failed: %s\n' "$profile_artifact" >&2
+    exit 4
+fi
+xcrun xctrace export --input "$profile_counter_trace" --toc \
+    --output "$profile_artifact/exports/counter-toc.xml"
+if grep -q 'Counter Set: (null)' "$profile_artifact/exports/counter-toc.xml"; then
+    printf 'performance_counter_status=unsupported\n' >> "$profile_summary"
+    printf 'timeline passed; detailed counters unsupported: %s\n' "$profile_artifact" >&2
+    exit 4
+fi
+printf 'performance_counter_status=passed\n' >> "$profile_summary"
+printf 'timeline, replay, and counters passed: %s\n' "$profile_artifact"
