@@ -85,6 +85,7 @@ coupled_metal_air(WorldContact src/metal/MetalWorldContact.metal)
 coupled_metal_air(WorldCompiler src/metal/WorldCompiler.metal)
 coupled_metal_air(LocomotionTask src/metal/LocomotionTask.metal)
 coupled_metal_air(PolicyInference src/metal/PolicyInference.metal)
+coupled_metal_air(Metal4ExecutionProbe src/metal/Metal4ExecutionProbe.metal PRECISE)
 
 add_custom_command(
     OUTPUT "${COUPLED_METALLIB}"
@@ -96,6 +97,7 @@ add_custom_target(coupled_shaders ALL DEPENDS "${COUPLED_METALLIB}")
 
 add_library(coupled_physics STATIC
     src/evidence/TrialEvidence.mm
+    src/metal/Metal4Execution.mm
     src/core/Model.cpp
     src/core/CpuDynamics.cpp
     src/core/EngineModel.cpp
@@ -199,6 +201,11 @@ target_compile_definitions(
     coupled_perfused_active_tissue_contract_probe
     PRIVATE NUMI_JEJUNUM_MATERIAL="${CMAKE_CURRENT_SOURCE_DIR}/matter/materials/porcine_jejunum_fung.nmatter")
 
+coupled_probe(coupled_metal4_execution_probe apps/metal4_execution_probe.mm)
+target_compile_options(coupled_metal4_execution_probe PRIVATE -fobjc-arc)
+target_compile_definitions(coupled_metal4_execution_probe PRIVATE
+    COUPLED_METALLIB="${COUPLED_METALLIB}")
+
 if(BUILD_TESTING)
     add_test(NAME coupled.matter.metal_world
         COMMAND $<TARGET_FILE:coupled_matter_physics_probe> --metal-world-coupling)
@@ -208,10 +215,13 @@ if(BUILD_TESTING)
         COMMAND $<TARGET_FILE:coupled_trial_evidence_probe>)
     add_test(NAME coupled.tissue.perfused_active_contract
         COMMAND $<TARGET_FILE:coupled_perfused_active_tissue_contract_probe>)
+    add_test(NAME coupled.metal4.execution_contract
+        COMMAND $<TARGET_FILE:coupled_metal4_execution_probe>)
     set_tests_properties(
         coupled.matter.metal_world
         coupled.suture.tissue_coupling
         coupled.evidence.trial_contract
         coupled.tissue.perfused_active_contract
+        coupled.metal4.execution_contract
         PROPERTIES LABELS "coupled;metal;physics" TIMEOUT 300)
 endif()
