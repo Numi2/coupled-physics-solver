@@ -95,6 +95,7 @@ add_custom_command(
 add_custom_target(coupled_shaders ALL DEPENDS "${COUPLED_METALLIB}")
 
 add_library(coupled_physics STATIC
+    src/evidence/TrialEvidence.mm
     src/core/Model.cpp
     src/core/CpuDynamics.cpp
     src/core/EngineModel.cpp
@@ -186,11 +187,21 @@ target_compile_definitions(coupled_suture_handoff_probe PRIVATE
     NUMI_JEJUNUM_MATERIAL="${CMAKE_CURRENT_SOURCE_DIR}/matter/materials/porcine_jejunum_fung.nmatter"
     NUMI_MATTER_METALLIB="${CMAKE_CURRENT_BINARY_DIR}/matter/shaders/NumiMatter.metallib")
 
+coupled_probe(coupled_trial_evidence_probe apps/trial_evidence_probe.mm)
+target_compile_options(coupled_trial_evidence_probe PRIVATE -fobjc-arc)
+
+coupled_probe(coupled_trial_check apps/trial_check.cpp)
+
 if(BUILD_TESTING)
     add_test(NAME coupled.matter.metal_world
         COMMAND $<TARGET_FILE:coupled_matter_physics_probe> --metal-world-coupling)
     add_test(NAME coupled.suture.tissue_coupling
         COMMAND $<TARGET_FILE:coupled_suture_handoff_probe> --tissue-coupling-only)
-    set_tests_properties(coupled.matter.metal_world coupled.suture.tissue_coupling
+    add_test(NAME coupled.evidence.trial_contract
+        COMMAND $<TARGET_FILE:coupled_trial_evidence_probe>)
+    set_tests_properties(
+        coupled.matter.metal_world
+        coupled.suture.tissue_coupling
+        coupled.evidence.trial_contract
         PROPERTIES LABELS "coupled;metal;physics" TIMEOUT 300)
 endif()
