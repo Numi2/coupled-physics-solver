@@ -1256,6 +1256,20 @@ kernel void nm_fem_select_backtracking(
                     dispatch.femNodeCount;
                 for (uint slot = 0u; slot < 4u; ++slot) {
                     const uint index = nodeBase + tetrahedron.nodes[slot];
+                    // The same alpha owns mechanics and all mixed fields.
+                    // Reject an infeasible field trial here so the later KKT
+                    // apply cannot discover a bound violation after the
+                    // deformation/volume line search has already committed.
+                    const float4 currentField = float4(
+                        fields[index].primary.yzw,
+                        fields[index].secondary.x
+                    );
+                    const float4 trialField = currentField +
+                        alpha * correction[totalNodes + index];
+                    valid = valid && all(isfinite(trialField)) &&
+                        trialField.x >= solver.globalization.y &&
+                        trialField.w >= -solver.globalization.z &&
+                        trialField.w <= 1.0f + solver.globalization.z;
                     currentPressure += fields[index].primary.x;
                     trialPressure += fields[index].primary.x +
                         alpha * bulk * correction[index].w;

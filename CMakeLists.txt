@@ -223,6 +223,8 @@ if(BUILD_TESTING)
         COMMAND $<TARGET_FILE:coupled_matter_physics_probe> --heterogeneous-multiphysics)
     add_test(NAME coupled.suture.tissue_coupling
         COMMAND $<TARGET_FILE:coupled_suture_handoff_probe> --tissue-coupling-only)
+    add_test(NAME coupled.suture.perfused_tissue_coupling
+        COMMAND $<TARGET_FILE:coupled_suture_handoff_probe> --perfused-tissue-coupling-only)
     add_test(NAME coupled.evidence.trial_contract
         COMMAND $<TARGET_FILE:coupled_trial_evidence_probe>)
     add_test(NAME coupled.tissue.perfused_active_contract
@@ -236,6 +238,7 @@ if(BUILD_TESTING)
         coupled.matter.heterogeneous_fem
         coupled.matter.heterogeneous_multiphysics
         coupled.suture.tissue_coupling
+        coupled.suture.perfused_tissue_coupling
         coupled.evidence.trial_contract
         coupled.tissue.perfused_active_contract
         coupled.tissue.perfused_active_metal

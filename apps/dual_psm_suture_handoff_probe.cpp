@@ -4192,11 +4192,91 @@ std::string matterCompileErrors(
     return result;
 }
 
+numi::matter::IdentifiedJejunalScalar couplingIdentified(
+    const double value
+) {
+    const double width = std::max(std::abs(value) * 0.1, 1.0e-12);
+    return {
+        .value = value,
+        .lowerBound = value == 0.0 ? 0.0 : value - width,
+        .upperBound = value + width,
+        .basis = numi::matter::IdentifiedJejunalBasis::hierarchicalFit,
+        .evidenceId = std::string(64u, 'd'),
+    };
+}
+
+numi::matter::PerfusedJejunalLayerSpec couplingLayer(
+    const numi::matter::JejunalLayer id,
+    const double fraction,
+    const double density,
+    const double fungC,
+    const double activeTension,
+    const double conductivity,
+    const std::array<double, 3>& fibre
+) {
+    numi::matter::PerfusedJejunalLayerSpec result;
+    result.layer = id;
+    result.thicknessFraction = couplingIdentified(fraction);
+    result.densityKgPerM3 = couplingIdentified(density);
+    result.fungCpa = couplingIdentified(fungC);
+    result.longitudinalCoefficient = couplingIdentified(81.2);
+    result.circumferentialCoefficient = couplingIdentified(72.4);
+    result.couplingCoefficient = couplingIdentified(19.7);
+    result.groundShearPa = couplingIdentified(250.0);
+    result.viscosityPaS = couplingIdentified(5.0);
+    result.bulkModulusPa = couplingIdentified(150000.0);
+    result.poreStoragePerPa = couplingIdentified(1.0e-6);
+    result.poreMobilityM2PerPaS = couplingIdentified(1.0e-10);
+    result.electricalConductivitySPerM = couplingIdentified(conductivity);
+    result.activationDiffusivityM2PerS = couplingIdentified(1.0e-6);
+    result.activationOnRatePerS = couplingIdentified(2.0);
+    result.activationOffRatePerS = couplingIdentified(1.0);
+    result.maximumActiveTensionPa = couplingIdentified(activeTension);
+    result.activationThresholdV = couplingIdentified(0.1);
+    result.activationSlopePerV = couplingIdentified(8.0);
+    result.cohesiveStrengthPa = couplingIdentified(10000.0);
+    result.fractureEnergyJPerM2 = couplingIdentified(100.0);
+    result.staticFriction = couplingIdentified(0.45);
+    result.dynamicFriction = couplingIdentified(0.35);
+    result.fibreDirection = fibre;
+    return result;
+}
+
+numi::matter::PerfusedActiveJejunumSpec couplingPerfusedTissueSpec() {
+    numi::matter::PerfusedActiveJejunumSpec spec;
+    spec.trialManifestSha256 = std::string(64u, 'a');
+    spec.parameterBundleSha256 = std::string(64u, 'b');
+    spec.lengthM = couplingIdentified(0.030);
+    spec.widthM = couplingIdentified(0.024);
+    spec.thicknessM = couplingIdentified(0.0008);
+    spec.incisionLengthM = couplingIdentified(0.016);
+    spec.incisionGapM = couplingIdentified(0.0006);
+    spec.perfusionTemperatureK = couplingIdentified(310.15);
+    spec.arterialPressurePa = couplingIdentified(10000.0);
+    spec.perfusateFlowM3PerS = couplingIdentified(1.0e-6);
+    spec.initialPorePressurePa = couplingIdentified(1000.0);
+    spec.layers = {{
+        couplingLayer(numi::matter::JejunalLayer::mucosaSubmucosa,
+            0.35, 1020.0, 760.0, 0.0, 0.08, {1.0, 0.0, 0.0}),
+        couplingLayer(numi::matter::JejunalLayer::circularMuscle,
+            0.25, 1050.0, 820.0, 1800.0, 0.16, {0.0, 1.0, 0.0}),
+        couplingLayer(numi::matter::JejunalLayer::longitudinalMuscle,
+            0.25, 1040.0, 700.0, 1500.0, 0.12, {1.0, 0.0, 0.0}),
+        couplingLayer(numi::matter::JejunalLayer::serosa,
+            0.15, 980.0, 520.0, 0.0, 0.05, {0.0, 1.0, 0.0}),
+    }};
+    spec.longitudinalCells = 6u;
+    spec.circumferentialCells = 6u;
+    spec.throughThicknessCells = 4u;
+    return spec;
+}
+
 numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
     const metalrobo::HeterogeneousWorld& world,
     const metalrobo::CurvedSutureNeedleAsset& needleAsset,
     const double initialSurfaceOffsetM,
     const bool punctureTip,
+    const bool perfusedLayers,
     const std::uint32_t punctureContactSegmentCount,
     const std::uint32_t sutureContactSegmentCount,
     numi::matter::PorcineJejunumClosureCoupon& coupon
@@ -4216,6 +4296,8 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
             matterCompileErrors(parsed.diagnostics)
     );
 
+    require(!perfusedLayers || !punctureTip,
+        "perfused layered coupling does not yet own topology mutation");
     // Retain the source-sized 30 x 24 x 0.77 mm porcine coupon and 16 mm
     // enterotomy. The contact-only swage regression uses the smallest
     // qualified 6x6x1 transaction mesh. A puncture uses the production
@@ -4225,7 +4307,7 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
     // resolve both the 0.126 mm terminal taper and the 0.20 mm strand/contact
     // band without shrinking the specimen.
     numi::matter::PorcineJejunumFungSpec spec;
-    if (!punctureTip) {
+    if (!punctureTip && !perfusedLayers) {
         // Six cells per in-plane axis is the smallest topology qualified by
         // the owning surgical-tissue replay. A 4x4 mixed element block leaves
         // its normalized pressure mode dominated by rest-shape roundoff.
@@ -4239,15 +4321,69 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
     }
     spec.fixLongitudinalEnds = true;
     std::string materialError;
-    require(
-        numi::matter::configurePorcineJejunumFungMaterial(
-            parsed.material,
-            spec,
-            &materialError
-        ),
-        materialError
-    );
-    coupon = numi::matter::makePorcineJejunumClosureCoupon(0u, spec);
+    std::vector<numi::matter::MaterialProgram> tissueMaterials;
+    if (perfusedLayers) {
+        const auto activeSpec = couplingPerfusedTissueSpec();
+        spec.lengthM.value = activeSpec.lengthM.value;
+        spec.widthM.value = activeSpec.widthM.value;
+        spec.thicknessM.value = activeSpec.thicknessM.value;
+        spec.incisionLengthM.value = activeSpec.incisionLengthM.value;
+        spec.incisionGapM.value = activeSpec.incisionGapM.value;
+        spec.longitudinalCells = activeSpec.longitudinalCells;
+        spec.circumferentialCells = activeSpec.circumferentialCells;
+        spec.throughThicknessCells = activeSpec.throughThicknessCells;
+        for (const auto& layerSpec : activeSpec.layers) {
+            auto layerParsed =
+                numi::matter::parseMatterFile(NUMI_JEJUNUM_MATERIAL);
+            require(layerParsed.succeeded(),
+                "perfused layer material parse failed: " +
+                    matterCompileErrors(layerParsed.diagnostics));
+            require(
+                numi::matter::configurePerfusedActiveJejunumLayerMaterial(
+                    layerParsed.material, layerSpec, &materialError
+                ),
+                materialError
+            );
+            tissueMaterials.push_back(std::move(layerParsed.material));
+        }
+        auto activeCoupon =
+            numi::matter::makePerfusedActiveJejunumClosureCoupon(
+                {0u, 1u, 2u, 3u}, activeSpec
+            );
+        coupon.object = std::move(activeCoupon.object);
+        coupon.metadata = std::move(activeCoupon.metadata);
+        coupon.spec = spec;
+        double minimumX = coupon.object.femNodes.front()[0];
+        double maximumX = minimumX;
+        for (const auto& node : coupon.object.femNodes) {
+            minimumX = std::min(minimumX, node[0]);
+            maximumX = std::max(maximumX, node[0]);
+        }
+        for (std::uint32_t node = 0u;
+             node < coupon.object.femNodes.size(); ++node) {
+            const double x = coupon.object.femNodes[node][0];
+            if (std::abs(x - minimumX) <= 1.0e-12 ||
+                std::abs(x - maximumX) <= 1.0e-12) {
+                coupon.object.femFixedNodes.push_back(node);
+            }
+        }
+        numi::matter::FieldBoundarySource ground;
+        ground.node = 0u;
+        ground.flags = NM_FIELD_DIRICHLET_ELECTRIC_POTENTIAL;
+        ground.stableIdentifier = 1u;
+        coupon.object.fieldBoundaries.push_back(ground);
+    } else {
+        require(
+            numi::matter::configurePorcineJejunumFungMaterial(
+                parsed.material,
+                spec,
+                &materialError
+            ),
+            materialError
+        );
+        tissueMaterials.push_back(std::move(parsed.material));
+        coupon = numi::matter::makePorcineJejunumClosureCoupon(0u, spec);
+    }
     if (sutureContactSegmentCount != 0u) {
         // This is a deterministic operative-field discretization, not a change
         // to specimen geometry or material calibration. Piecewise monotone
@@ -4679,20 +4815,25 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
     source.contactSlop = kSutureTissueContactSlopM;
     source.maximumDepenetrationSpeed = 0.05;
     source.deterministic = true;
-    // The contact-active coupon reaches the identical accepted state by the
-    // fifth encoded Newton pass; later static tail passes do not alter it.
-    source.mixedSolver.newtonIterations = 5u;
-    source.mixedSolver.fgmresRestart = 10u;
+    // The passive contact coupon reaches the identical accepted state by the
+    // fifth encoded Newton pass. The coupled four-layer field system retains
+    // the already-qualified perfused-tissue work budget; acceptance tolerances
+    // remain identical across both paths.
+    source.mixedSolver.newtonIterations = perfusedLayers ? 12u : 5u;
+    source.mixedSolver.fgmresRestart = perfusedLayers ? 16u : 10u;
     // The contact-refined operative entry uses the full ten-column Arnoldi
     // cycle while closing its accepted nonlinear residual by over two orders
     // of magnitude. Do not encode empty restart cycles into every 62.5 us
     // surgical microstep; the live residual and certificate remain authority.
-    source.mixedSolver.fgmresIterations = 10u;
+    source.mixedSolver.fgmresIterations = perfusedLayers ? 64u : 10u;
     source.mixedSolver.lineSearchSteps = 12u;
     source.mixedSolver.relativeResidual = 5.0e-4;
     source.mixedSolver.volumeTolerance = 5.0e-4;
     source.mixedSolver.pressureTolerance = 5.0e-4;
     source.mixedSolver.minimumContactSeparationRatio = 0.05;
+    const std::uint32_t needleInterfaceMaterial = perfusedLayers ? 3u : 0u;
+    const std::uint32_t sutureInterfaceMaterial =
+        static_cast<std::uint32_t>(tissueMaterials.size());
     std::optional<numi::matter::MaterialProgram> sutureInterface;
     if (sutureContactSegmentCount != 0u) {
         require(
@@ -4702,7 +4843,7 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
                     world.rods[0].model.restPositions.size(),
             "suture-to-tissue contact exceeds the live DER topology"
         );
-        sutureInterface = parsed.material;
+        sutureInterface = tissueMaterials.at(needleInterfaceMaterial);
         sutureInterface->name = "pdo_suture_interface";
         const MRMaterialGPU& rodMaterial = world.model.materials[
             world.rods[0].collision.materialIndex
@@ -4712,7 +4853,9 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
         sutureInterface->restitution = 0.0;
         sutureInterface->adhesion = 0.0;
     }
-    source.materials.push_back(std::move(parsed.material));
+    for (auto& tissueMaterial : tissueMaterials) {
+        source.materials.push_back(std::move(tissueMaterial));
+    }
     if (sutureInterface.has_value()) {
         source.materials.push_back(std::move(*sutureInterface));
     }
@@ -4727,7 +4870,9 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
     // strand; kinematic motion remains prescribed but still deforms tissue.
     const bool dynamicNeedle =
         needle.flagsAndIndices[0] == MR_MOTION_DYNAMIC;
-    const auto appendNeedleProxy = [&source, &world, dynamicNeedle](
+    const auto appendNeedleProxy = [
+        &source, &world, dynamicNeedle, needleInterfaceMaterial
+    ](
         const Vec3 first,
         const Vec3 second,
         const double radius,
@@ -4737,7 +4882,7 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
         proxy.shape = NM_RIGID_CAPSULE;
         proxy.bodyIndex = world.sceneBodyIndices[0];
         proxy.sceneBodyIndex = dynamicNeedle ? 0u : NM_INVALID_INDEX;
-        proxy.materialIndex = 0u;
+        proxy.materialIndex = needleInterfaceMaterial;
         proxy.localCenter = {first.x, first.y, first.z};
         proxy.localExtent = {second.x, second.y, second.z};
         proxy.radiusOrOffset = radius;
@@ -4793,7 +4938,7 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
         arc.shape = NM_RIGID_ARC;
         arc.bodyIndex = world.sceneBodyIndices[0];
         arc.sceneBodyIndex = dynamicNeedle ? 0u : NM_INVALID_INDEX;
-        arc.materialIndex = 0u;
+        arc.materialIndex = needleInterfaceMaterial;
         arc.localCenter = {
             arcCenterLocal.x,
             arcCenterLocal.y,
@@ -4853,7 +4998,7 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
          ++edge) {
         numi::matter::RigidProxySource proxy;
         proxy.shape = NM_RIGID_CAPSULE;
-        proxy.materialIndex = 1u;
+        proxy.materialIndex = sutureInterfaceMaterial;
         proxy.radiusOrOffset = world.rods[0].model.radius;
         proxy.sutureStrand = true;
         proxy.strandNodeA = edge;
@@ -4986,6 +5131,7 @@ Arguments parseArguments(const int argc, const char* const argv[]) {
         if (argument == "--geometry-only" ||
             argument == "--settle-only" ||
             argument == "--tissue-coupling-only" ||
+            argument == "--perfused-tissue-coupling-only" ||
             argument == "--tissue-rest-only" ||
             argument == "--tissue-puncture-only" ||
             argument == "--tissue-puncture-advance-only" ||
@@ -6345,8 +6491,11 @@ int main(const int argc, const char* const argv[]) {
         const bool longSettle = options.mode == "--long-settle";
         const bool settleOnly = longSettle ||
             options.mode == "--settle-only";
+        const bool perfusedTissueCouplingOnly =
+            options.mode == "--perfused-tissue-coupling-only";
         const bool tissueCouplingOnly =
-            options.mode == "--tissue-coupling-only";
+            options.mode == "--tissue-coupling-only" ||
+            perfusedTissueCouplingOnly;
         const bool tissueRestOnly =
             options.mode == "--tissue-rest-only";
         const bool tissueSutureEntryOnly =
@@ -11200,6 +11349,7 @@ int main(const int argc, const char* const argv[]) {
                     ? kPunctureInitialClearanceM
                     : (tissueRestOnly ? 1.5e-4 : 5.0e-5),
                 tissuePunctureOnly,
+                perfusedTissueCouplingOnly,
                 (tissueCurvedPassageOnly || tissueSutureEntryContactOnly)
                     ? kCurvedPassageContactSegmentCount
                     : 1u,
@@ -13584,7 +13734,9 @@ int main(const int argc, const char* const argv[]) {
                             : (tissuePunctureAdvanceOnly
                                 ? "tissue_puncture_channel_advance=ok"
                                 : "tissue_tapered_tip_puncture=ok"))
-                        : "tissue_suture_coupling=ok"))
+                        : (perfusedTissueCouplingOnly
+                            ? "perfused_tissue_suture_coupling=ok"
+                            : "tissue_suture_coupling=ok")))
                 << " reaction_contacts="
                 << reaction.impulseAndCount.w
                 << " final_active_contacts=" << activeContacts

@@ -53,6 +53,7 @@ recording timeline evidence without making counter claims.
 numi coupled-profile --mode metal4
 numi coupled-profile --mode tissue
 numi coupled-profile --mode perfused
+numi coupled-profile --mode coupled-perfused
 numi coupled-profile --mode heterogeneous
 numi coupled-profile --mode heterogeneous-mixed
 ```
@@ -64,8 +65,11 @@ and active-stress coefficients. They must share the nodal pressure scale (bulk
 modulus and thermal expansion). The compiler still rejects heterogeneous
 mutable topology until every mutation transaction preserves material identity.
 The perfused probe executes the four-layer path on Metal with synthetic,
-provenance-shaped fixtures; it proves execution and replay, not ex-vivo
-calibration or indistinguishable visual/physical fidelity.
+provenance-shaped fixtures. The `coupled-perfused` mode connects that same
+heterogeneous, active-field tissue to the live needle-swage-DER reaction
+transaction. It deliberately disables puncture mutation until mutation can
+preserve per-tetrahedron material identity. Both modes prove execution and
+replay, not ex-vivo calibration or indistinguishable visual/physical fidelity.
 
 Promotion remains gated by exact replay, FP64 parity, physical outcomes, zero
 failed steps, and same-device Metal timeline/counter evidence. A successful

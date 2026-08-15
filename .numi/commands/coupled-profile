@@ -10,7 +10,7 @@ fi
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
     printf '%s\n' \
-        "Usage: numi coupled-profile [--mode metal4|tissue|perfused|heterogeneous|heterogeneous-mixed] [--build-dir PATH] [--artifact-dir PATH] [--no-build] [--timeline-only]" \
+        "Usage: numi coupled-profile [--mode metal4|tissue|perfused|coupled-perfused|heterogeneous|heterogeneous-mixed] [--build-dir PATH] [--artifact-dir PATH] [--no-build] [--timeline-only]" \
         "" \
         "Runs the selected probe twice, requires exact normalized replay, records" \
         "a Metal System Trace, exports GPU/error/counter tables, and attempts the" \
@@ -69,6 +69,11 @@ case "$profile_mode" in
         profile_argument=
         profile_gate='four-layer perfused-active Metal execution; parameters are synthetic evidence-contract fixtures'
         ;;
+    coupled-perfused)
+        profile_target=coupled_suture_handoff_probe
+        profile_argument=--perfused-tissue-coupling-only
+        profile_gate='four-layer perfused-active tissue coupled to the live needle-swage-DER transaction; parameters are synthetic evidence-contract fixtures and puncture mutation is disabled'
+        ;;
     heterogeneous)
         profile_target=coupled_matter_physics_probe
         profile_argument=--heterogeneous-fem
@@ -79,7 +84,7 @@ case "$profile_mode" in
         profile_argument=--heterogeneous-multiphysics
         profile_gate='heterogeneous mixed-field FEM with shared pressure scaling; topology mutation is not yet enabled'
         ;;
-    *) printf '%s\n' "mode must be metal4, tissue, perfused, heterogeneous, or heterogeneous-mixed" >&2; exit 2 ;;
+    *) printf '%s\n' "mode must be metal4, tissue, perfused, coupled-perfused, heterogeneous, or heterogeneous-mixed" >&2; exit 2 ;;
 esac
 
 if [ -z "$profile_artifact" ]; then
@@ -164,6 +169,11 @@ if [ "$profile_mode" = perfused ]; then
     grep -q '"schema":"numi.matter.perfused-active.v1"' \
         "$profile_artifact/replay-a.stdout"
     grep -q '"failed_steps":0' "$profile_artifact/replay-a.stdout"
+fi
+if [ "$profile_mode" = coupled-perfused ]; then
+    grep -q 'perfused_tissue_suture_coupling=ok' \
+        "$profile_artifact/replay-a.stdout"
+    grep -q 'failed_steps=0' "$profile_artifact/replay-a.stdout"
 fi
 if [ "$profile_mode" = heterogeneous ] ||
    [ "$profile_mode" = heterogeneous-mixed ]; then
