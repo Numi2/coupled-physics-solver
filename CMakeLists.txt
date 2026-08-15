@@ -201,6 +201,14 @@ target_compile_definitions(
     coupled_perfused_active_tissue_contract_probe
     PRIVATE NUMI_JEJUNUM_MATERIAL="${CMAKE_CURRENT_SOURCE_DIR}/matter/materials/porcine_jejunum_fung.nmatter")
 
+coupled_probe(
+    coupled_perfused_active_tissue_probe
+    apps/perfused_active_tissue_probe.mm)
+target_compile_options(coupled_perfused_active_tissue_probe PRIVATE -fobjc-arc)
+target_compile_definitions(coupled_perfused_active_tissue_probe PRIVATE
+    NUMI_JEJUNUM_MATERIAL="${CMAKE_CURRENT_SOURCE_DIR}/matter/materials/porcine_jejunum_fung.nmatter"
+    NUMI_MATTER_METALLIB="${CMAKE_CURRENT_BINARY_DIR}/matter/shaders/NumiMatter.metallib")
+
 coupled_probe(coupled_metal4_execution_probe apps/metal4_execution_probe.mm)
 target_compile_options(coupled_metal4_execution_probe PRIVATE -fobjc-arc)
 target_compile_definitions(coupled_metal4_execution_probe PRIVATE
@@ -219,6 +227,8 @@ if(BUILD_TESTING)
         COMMAND $<TARGET_FILE:coupled_trial_evidence_probe>)
     add_test(NAME coupled.tissue.perfused_active_contract
         COMMAND $<TARGET_FILE:coupled_perfused_active_tissue_contract_probe>)
+    add_test(NAME coupled.tissue.perfused_active_metal
+        COMMAND $<TARGET_FILE:coupled_perfused_active_tissue_probe>)
     add_test(NAME coupled.metal4.execution_contract
         COMMAND $<TARGET_FILE:coupled_metal4_execution_probe>)
     set_tests_properties(
@@ -228,6 +238,7 @@ if(BUILD_TESTING)
         coupled.suture.tissue_coupling
         coupled.evidence.trial_contract
         coupled.tissue.perfused_active_contract
+        coupled.tissue.perfused_active_metal
         coupled.metal4.execution_contract
         PROPERTIES LABELS "coupled;metal;physics" TIMEOUT 300)
 endif()

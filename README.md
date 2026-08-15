@@ -36,6 +36,7 @@ The focused executables are written to `build/bin`:
 - `coupled_suture_handoff_probe`
 - `coupled_trial_check`
 - `coupled_perfused_active_tissue_contract_probe`
+- `coupled_perfused_active_tissue_probe`
 - `coupled_metal4_execution_probe`
 
 `coupled_trial_check MANIFEST.json` validates the versioned manifest, stream
@@ -51,6 +52,7 @@ recording timeline evidence without making counter claims.
 ```sh
 numi coupled-profile --mode metal4
 numi coupled-profile --mode tissue
+numi coupled-profile --mode perfused
 numi coupled-profile --mode heterogeneous
 numi coupled-profile --mode heterogeneous-mixed
 ```
@@ -61,6 +63,9 @@ heterogeneous elements additionally own their transport, activation, fibre,
 and active-stress coefficients. They must share the nodal pressure scale (bulk
 modulus and thermal expansion). The compiler still rejects heterogeneous
 mutable topology until every mutation transaction preserves material identity.
+The perfused probe executes the four-layer path on Metal with synthetic,
+provenance-shaped fixtures; it proves execution and replay, not ex-vivo
+calibration or indistinguishable visual/physical fidelity.
 
 Promotion remains gated by exact replay, FP64 parity, physical outcomes, zero
 failed steps, and same-device Metal timeline/counter evidence. A successful
