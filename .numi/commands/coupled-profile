@@ -10,7 +10,7 @@ fi
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
     printf '%s\n' \
-        "Usage: numi coupled-profile [--mode metal4|tissue] [--build-dir PATH] [--artifact-dir PATH] [--no-build] [--timeline-only]" \
+        "Usage: numi coupled-profile [--mode metal4|tissue|heterogeneous] [--build-dir PATH] [--artifact-dir PATH] [--no-build] [--timeline-only]" \
         "" \
         "Runs the selected probe twice, requires exact normalized replay, records" \
         "a Metal System Trace, exports GPU/error/counter tables, and attempts the" \
@@ -64,7 +64,12 @@ case "$profile_mode" in
         profile_argument=--tissue-coupling-only
         profile_gate='simulated tissue-suture coupling regression; not measured calibration'
         ;;
-    *) printf '%s\n' "mode must be metal4 or tissue" >&2; exit 2 ;;
+    heterogeneous)
+        profile_target=coupled_matter_physics_probe
+        profile_argument=--heterogeneous-fem
+        profile_gate='passive heterogeneous FEM route; mixed fields and mutation are not yet enabled'
+        ;;
+    *) printf '%s\n' "mode must be metal4, tissue, or heterogeneous" >&2; exit 2 ;;
 esac
 
 if [ -z "$profile_artifact" ]; then
@@ -142,6 +147,11 @@ shasum -a 256 "$profile_artifact/replay-a.normalized" > "$profile_artifact/repla
 if [ "$profile_mode" = tissue ]; then
     grep -q 'tissue_suture_coupling=ok' "$profile_artifact/replay-a.stdout"
     grep -q 'failed_steps=0' "$profile_artifact/replay-a.stdout"
+fi
+if [ "$profile_mode" = heterogeneous ]; then
+    grep -q '"representation":"heterogeneous_fem"' \
+        "$profile_artifact/replay-a.stdout"
+    grep -q '"failed_steps":0' "$profile_artifact/replay-a.stdout"
 fi
 
 profile_trace="$profile_artifact/coupled.trace"

@@ -209,6 +209,8 @@ target_compile_definitions(coupled_metal4_execution_probe PRIVATE
 if(BUILD_TESTING)
     add_test(NAME coupled.matter.metal_world
         COMMAND $<TARGET_FILE:coupled_matter_physics_probe> --metal-world-coupling)
+    add_test(NAME coupled.matter.heterogeneous_fem
+        COMMAND $<TARGET_FILE:coupled_matter_physics_probe> --heterogeneous-fem)
     add_test(NAME coupled.suture.tissue_coupling
         COMMAND $<TARGET_FILE:coupled_suture_handoff_probe> --tissue-coupling-only)
     add_test(NAME coupled.evidence.trial_contract
@@ -219,6 +221,7 @@ if(BUILD_TESTING)
         COMMAND $<TARGET_FILE:coupled_metal4_execution_probe>)
     set_tests_properties(
         coupled.matter.metal_world
+        coupled.matter.heterogeneous_fem
         coupled.suture.tissue_coupling
         coupled.evidence.trial_contract
         coupled.tissue.perfused_active_contract

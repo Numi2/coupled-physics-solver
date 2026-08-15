@@ -39,6 +39,18 @@ void require(const bool condition, const std::string& message) {
     }
 }
 
+std::uint64_t fingerprintBytes(const void* bytes, const std::size_t count) {
+    constexpr std::uint64_t kOffset = 1469598103934665603ull;
+    constexpr std::uint64_t kPrime = 1099511628211ull;
+    const auto* values = static_cast<const unsigned char*>(bytes);
+    std::uint64_t result = kOffset;
+    for (std::size_t index = 0u; index < count; ++index) {
+        result ^= values[index];
+        result *= kPrime;
+    }
+    return result;
+}
+
 std::string diagnosticFloat(const float value) {
     std::array<char, 32> text{};
     const int written = std::snprintf(
@@ -325,6 +337,80 @@ numi::matter::CompiledWorld compileCase(
         !includePlane || compiled.world.dispatch.contactPairCount > 0u,
         "drop case has no continuum-to-plane contact pairs"
     );
+    return std::move(compiled.world);
+}
+
+numi::matter::CompiledWorld compileHeterogeneousFEMCase(
+    const bool swapMaterials
+) {
+    const auto parsed = numi::matter::parseMatterFile(NUMI_MATTER_MATERIAL);
+    require(parsed.succeeded(), "heterogeneous FEM material did not parse");
+    auto soft = parsed.material;
+    auto stiff = parsed.material;
+    soft.name = "heterogeneous_soft";
+    stiff.name = "heterogeneous_stiff";
+    const auto configure = [](numi::matter::MaterialProgram& material,
+                              const double density,
+                              const double mu,
+                              const double lambda) {
+        for (auto& parameter : material.parameters) {
+            if (parameter.name == "density") parameter.defaultValue = density;
+            if (parameter.name == "mu") parameter.defaultValue = mu;
+            if (parameter.name == "lambda") parameter.defaultValue = lambda;
+        }
+    };
+    configure(soft, 900.0, 1.0e4, 2.0e5);
+    configure(stiff, 1200.0, 8.0e5, 2.0e7);
+
+    numi::matter::WorldSource source;
+    source.environmentCount = 1u;
+    source.frameTimestep = 1.0 / 1000.0;
+    source.gravity = {0.0, 0.0, -9.81};
+    source.materials.push_back(std::move(soft));
+    source.materials.push_back(std::move(stiff));
+
+    numi::matter::ObjectSource object;
+    object.name = swapMaterials
+        ? "heterogeneous_fem_swapped" : "heterogeneous_fem_reference";
+    object.materialIndex = 0u;
+    object.representation = numi::matter::Representation::fem;
+    object.mixedFEM = false;
+    object.characteristicLength = 0.01;
+    object.femNodes = {
+        {0.0, 0.0, 0.0}, {0.01, 0.0, 0.0}, {0.0, 0.01, 0.0},
+        {0.0, 0.0, 0.01}, {0.0, 0.0, -0.01},
+    };
+    object.femFixedNodes = {0u, 1u, 2u};
+    numi::matter::TetrahedronSource upper;
+    upper.nodes = {0u, 1u, 2u, 3u};
+    numi::matter::TetrahedronSource lower;
+    lower.nodes = {0u, 2u, 1u, 4u};
+    upper.materialIndex = swapMaterials ? 1u : 0u;
+    lower.materialIndex = swapMaterials ? 0u : 1u;
+    object.tetrahedra = {upper, lower};
+    source.objects.push_back(std::move(object));
+
+    numi::matter::CompileOptions options;
+    options.maximumRateExponent = 6u;
+    auto compiled = numi::matter::compileWorld(source, options);
+    std::string failure = "heterogeneous FEM world did not compile";
+    for (const auto& diagnostic : compiled.diagnostics) {
+        failure += "; " + diagnostic.message;
+    }
+    require(compiled.succeeded(), failure);
+    const auto& tetrahedra = compiled.world.fem.tetrahedra;
+    require(tetrahedra.size() == 2u &&
+            tetrahedra[0].identity.x == upper.materialIndex &&
+            tetrahedra[1].identity.x == lower.materialIndex,
+        "heterogeneous FEM lost element material ownership");
+    double cookedMass = 0.0;
+    for (const NMFEMNodeStateGPU& node : compiled.world.fem.nodes) {
+        cookedMass += node.positionAndMass.w;
+    }
+    const double expectedMass = (900.0 + 1200.0) *
+        (0.01 * 0.01 * 0.01 / 6.0);
+    require(std::abs(cookedMass - expectedMass) <= 1.0e-6 * expectedMass,
+        "heterogeneous FEM did not assemble per-element density");
     return std::move(compiled.world);
 }
 
@@ -1000,6 +1086,7 @@ struct Outcome {
     float removedMass = 0.0f;
     double femMass = 0.0;
     std::array<double, 3> femMomentum{};
+    std::uint64_t femStateFingerprint = 0u;
     std::uint32_t learnedRevision = 0u;
     float nonlinearResidual = 0.0f;
     float relativeCorrection = 0.0f;
@@ -2225,6 +2312,10 @@ Outcome runCase(
                 }
             }
             if (!snapshot.femNodes.empty()) {
+                outcome.femStateFingerprint = fingerprintBytes(
+                    snapshot.femNodes.data(),
+                    snapshot.femNodes.size() * sizeof(NMFEMNodeStateGPU)
+                );
                 outcome.femMass = 0.0;
                 outcome.femMomentum = {};
                 for (const NMFEMNodeStateGPU& node : snapshot.femNodes) {
@@ -2605,6 +2696,8 @@ int main(int argc, const char* argv[]) {
         const bool femFree = argc == 2 && std::string_view(argv[1]) == "--fem-free";
         const bool femHighRate = argc == 2 && std::string_view(argv[1]) == "--fem-high-rate";
         const bool femHighDrop = argc == 2 && std::string_view(argv[1]) == "--fem-high-drop";
+        const bool heterogeneousFEM = argc == 2 &&
+            std::string_view(argv[1]) == "--heterogeneous-fem";
         require(
             argc == 1 || mixedOnly || statefulMPM || statefulFEM ||
                 femOnly || mpmOnly || mpmFree || mpmSingle ||
@@ -2617,8 +2710,8 @@ int main(int argc, const char* argv[]) {
                 articulatedFootPadSequence ||
                 identification || adaptiveDemotion ||
                 adaptivePromotion || adaptivePromotionRollback || femFree ||
-                femHighRate || femHighDrop,
-            "usage: metalrobo_matter_physics_probe [--poroelastic-compression|--articulated-foot-pad|--articulated-foot-pad-sequence|--mixed|--multiphysics|--topology-mutation|--topology-rollback|--cohesive-mutation|--small-scale-remesh|--puncture-mutation|--learned-material|--production-rollback|--stateful-mpm|--stateful-fem|--mpm|--mpm-free|--mpm-single|--mpm-single-contact|--mpm-gentle-contact|--mpm-batch|--mpm-rollback|--metal-world-coupling|--identification|--adaptive-demotion|--adaptive-promotion|--adaptive-promotion-rollback|--fem|--fem-free|--fem-high-rate|--fem-high-drop]"
+                femHighRate || femHighDrop || heterogeneousFEM,
+            "usage: metalrobo_matter_physics_probe [--poroelastic-compression|--articulated-foot-pad|--articulated-foot-pad-sequence|--mixed|--multiphysics|--topology-mutation|--topology-rollback|--cohesive-mutation|--small-scale-remesh|--puncture-mutation|--learned-material|--production-rollback|--stateful-mpm|--stateful-fem|--mpm|--mpm-free|--mpm-single|--mpm-single-contact|--mpm-gentle-contact|--mpm-batch|--mpm-rollback|--metal-world-coupling|--identification|--adaptive-demotion|--adaptive-promotion|--adaptive-promotion-rollback|--fem|--fem-free|--fem-high-rate|--fem-high-drop|--heterogeneous-fem]"
         );
         if (articulatedFootPad) {
             runArticulatedFootPadScene();
@@ -2905,6 +2998,47 @@ int main(int argc, const char* argv[]) {
                 << ",\"minimum_J\":" << mixed.minimumDeterminant
                 << "}\n";
         }
+        if (heterogeneousFEM) {
+            const auto referenceWorld = compileHeterogeneousFEMCase(false);
+            const auto swappedWorld = compileHeterogeneousFEMCase(true);
+            const auto reference = runCase(
+                referenceWorld, "heterogeneous FEM reference",
+                false, false, 8u
+            );
+            const auto replay = runCase(
+                referenceWorld, "heterogeneous FEM exact replay",
+                false, false, 8u
+            );
+            const auto swapped = runCase(
+                swappedWorld, "heterogeneous FEM swapped",
+                false, false, 8u
+            );
+            require(reference.femStateFingerprint != 0u &&
+                    reference.femStateFingerprint ==
+                        replay.femStateFingerprint,
+                "heterogeneous FEM did not retain exact device replay");
+            require(reference.femStateFingerprint !=
+                        swapped.femStateFingerprint &&
+                    reference.minimumDeterminant > 0.0f &&
+                    swapped.minimumDeterminant > 0.0f,
+                "swapping element materials did not alter the live FEM state");
+            std::cout
+                << "{\"schema\":\"numi.matter.physics-probe.v3\""
+                << ",\"representation\":\"heterogeneous_fem\""
+                << ",\"reference_state_fingerprint\":"
+                << reference.femStateFingerprint
+                << ",\"replay_state_fingerprint\":"
+                << replay.femStateFingerprint
+                << ",\"swapped_state_fingerprint\":"
+                << swapped.femStateFingerprint
+                << ",\"mass_kg\":" << reference.femMass
+                << ",\"reference_minimum_J\":"
+                << reference.minimumDeterminant
+                << ",\"swapped_minimum_J\":"
+                << swapped.minimumDeterminant
+                << ",\"failed_steps\":0"
+                << "}\n";
+        }
         if (mpmBatch) {
             constexpr std::uint32_t kBatchEnvironments = 32u;
             constexpr std::uint32_t kBatchControlSteps = 1u;
@@ -2966,7 +3100,8 @@ int main(int argc, const char* argv[]) {
             !poroelasticCompression &&
             !articulatedFootPad && !articulatedFootPadSequence &&
             !mixedOnly && !mpmBatch && !statefulMPM && !statefulFEM &&
-            !femOnly && !femFree && !femHighRate && !femHighDrop) {
+            !femOnly && !femFree && !femHighRate && !femHighDrop &&
+            !heterogeneousFEM) {
             const bool withPlane = !mpmFree && !mpmSingle;
             const auto mpm = runCase(
                 compileCase(
@@ -3029,7 +3164,7 @@ int main(int argc, const char* argv[]) {
             !poroelasticCompression &&
             !articulatedFootPad && !articulatedFootPadSequence &&
             !identification && !adaptiveDemotion && !adaptivePromotion &&
-            !adaptivePromotionRollback) {
+            !adaptivePromotionRollback && !heterogeneousFEM) {
             const bool withPlane = !femFree;
             const auto fem = runCase(
                 compileCase(

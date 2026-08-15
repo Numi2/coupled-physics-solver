@@ -994,9 +994,58 @@ CompileResult compileWorld(
         const Representation representation = selectRepresentation(
             object, material, result.diagnostics
         );
-        const std::uint32_t exponent = rateExponent(
+        const bool heterogeneousFEM =
+            representation == Representation::fem &&
+            std::ranges::any_of(
+                object.tetrahedra,
+                [&](const TetrahedronSource& tetrahedron) {
+                    return tetrahedron.materialIndex != NM_INVALID_INDEX &&
+                        tetrahedron.materialIndex != object.materialIndex;
+                }
+            );
+        if (heterogeneousFEM &&
+            (object.mixedFEM || object.multiphysics.enabled ||
+             object.mutationPolicy.enabled)) {
+            result.diagnostics.push_back({
+                Diagnostic::Severity::error, 0u, 0u,
+                "heterogeneous FEM object '" + object.name +
+                    "' currently requires passive, non-mixed, immutable "
+                    "topology; mixed fields and topology mutation still own "
+                    "an object-level material route",
+            });
+            return result;
+        }
+        std::uint32_t exponent = rateExponent(
             object, material, source, options
         );
+        if (representation == Representation::fem) {
+            for (const TetrahedronSource& tetrahedron : object.tetrahedra) {
+                const std::uint32_t tetrahedronMaterial =
+                    tetrahedron.materialIndex == NM_INVALID_INDEX
+                    ? object.materialIndex : tetrahedron.materialIndex;
+                if (tetrahedronMaterial >= source.materials.size() ||
+                    !supports(
+                        source.materials[tetrahedronMaterial],
+                        Representation::fem
+                    )) {
+                    result.diagnostics.push_back({
+                        Diagnostic::Severity::error, 0u, 0u,
+                        "FEM tetrahedron in object '" + object.name +
+                            "' references an invalid or non-FEM material",
+                    });
+                    return result;
+                }
+                exponent = std::max(
+                    exponent,
+                    rateExponent(
+                        object,
+                        source.materials[tetrahedronMaterial],
+                        source,
+                        options
+                    )
+                );
+            }
+        }
 
         NMContinuumObjectGPU descriptor{};
         descriptor.representation = representationCode(representation);
@@ -1581,7 +1630,6 @@ CompileResult compileWorld(
                     }
                 }
             }
-            const double rho = density(material);
             std::vector<double> localMass(nodeCapacity, 0.0);
             const auto cookedNodePosition = [&](const std::uint32_t local) {
                 const nm_float4 position = world.fem.nodes[
@@ -1594,6 +1642,12 @@ CompileResult compileWorld(
                 };
             };
             for (const TetrahedronSource& sourceTet : object.tetrahedra) {
+                const std::uint32_t tetrahedronMaterial =
+                    sourceTet.materialIndex == NM_INVALID_INDEX
+                    ? object.materialIndex : sourceTet.materialIndex;
+                const double rho = density(
+                    source.materials[tetrahedronMaterial]
+                );
                 if (std::ranges::any_of(sourceTet.nodes, [&](const std::uint32_t node) {
                     return node >= object.femNodes.size();
                 })) {
@@ -1646,7 +1700,7 @@ CompileResult compileWorld(
                     inverseRest[6], inverseRest[7], inverseRest[8]
                 );
                 tetrahedron.identity = {
-                    object.materialIndex,
+                    tetrahedronMaterial,
                     objectIndex,
                     1u,
                     NM_OBJECT_ACTIVE,

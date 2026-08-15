@@ -270,6 +270,10 @@ struct ParticleSource {
 
 struct TetrahedronSource {
     std::array<std::uint32_t, 4> nodes{};
+    // NM_INVALID_INDEX inherits ObjectSource::materialIndex. A concrete
+    // index assigns the volume constitutive law and density for this element;
+    // the object material remains the external interface/contact material.
+    std::uint32_t materialIndex = NM_INVALID_INDEX;
 };
 
 struct MixedSolverSource {

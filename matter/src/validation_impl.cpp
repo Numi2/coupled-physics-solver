@@ -1164,7 +1164,7 @@ private:
                         tetrahedron.nodes.z,
                         tetrahedron.nodes.w,
                     };
-                    if (tetrahedron.identity.x != object.materialIndex ||
+                    if (tetrahedron.identity.x >= world_.materials.size() ||
                         tetrahedron.identity.y != index ||
                         tetrahedron.identity.z != object.topologyGeneration ||
                         !finite4(tetrahedron.inverseRestRow0) ||

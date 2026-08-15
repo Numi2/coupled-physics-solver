@@ -51,7 +51,13 @@ recording timeline evidence without making counter claims.
 ```sh
 numi coupled-profile --mode metal4
 numi coupled-profile --mode tissue
+numi coupled-profile --mode heterogeneous
 ```
+
+Heterogeneous FEM tetrahedra may own distinct passive constitutive materials
+and densities while the object material owns external contact. The compiler
+currently rejects heterogeneous mixed-field or mutable-topology objects; those
+routes remain object-material based and are not part of this promotion.
 
 Promotion remains gated by exact replay, FP64 parity, physical outcomes, zero
 failed steps, and same-device Metal timeline/counter evidence. A successful
