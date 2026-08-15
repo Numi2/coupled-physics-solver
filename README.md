@@ -65,11 +65,16 @@ and active-stress coefficients. They must share the nodal pressure scale (bulk
 modulus and thermal expansion). The compiler still rejects heterogeneous
 mutable topology until every mutation transaction preserves material identity.
 The perfused probe executes the four-layer path on Metal with synthetic,
-provenance-shaped fixtures. The `coupled-perfused` mode connects that same
-heterogeneous, active-field tissue to the live needle-swage-DER reaction
-transaction. It deliberately disables puncture mutation until mutation can
-preserve per-tetrahedron material identity. Both modes prove execution and
-replay, not ex-vivo calibration or indistinguishable visual/physical fidelity.
+provenance-shaped fixtures. It also gates every state-free layer's compiled
+passive and mixed pressure/pore-pressure/active-fibre stress and mechanical
+tangent against an independent FP64 scalar evaluator, with a separate FP64
+directional-difference check. This is a constitutive-point parity boundary,
+not a full-step FP64 oracle. The `coupled-perfused` mode connects that same
+heterogeneous, active-field tissue directly to live DER strand contact through
+the hard needle swage. It deliberately disables puncture mutation until
+mutation can preserve per-tetrahedron material identity. Both modes prove
+execution and replay, not ex-vivo calibration or indistinguishable
+visual/physical fidelity.
 
 Promotion remains gated by exact replay, FP64 parity, physical outcomes, zero
 failed steps, and same-device Metal timeline/counter evidence. A successful

@@ -261,6 +261,43 @@ struct ConstitutiveProgram {
     std::uint64_t fingerprint = 0u;
 };
 
+// Independent scalar reference for the state-free constitutive programs used
+// by qualification probes. Matrices are row-major. The passive response is
+// evaluated from the compiled scalar bytecode in FP64, then the mixed
+// pressure/pore-pressure/active-fibre map is applied in FP64 with the authored
+// (pre-FP32-cook) coefficients. Stateful projection and learned materials are
+// deliberately rejected rather than silently approximated.
+struct ConstitutiveDifferentialInput {
+    std::array<double, 9> deformation{
+        1.0, 0.0, 0.0,
+        0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0,
+    };
+    std::array<double, 9> deformationDirection{};
+    std::array<double, 9> deformationRate{};
+    std::array<double, 9> rateDirection{};
+    double timestep = 0.0;
+    double temperature = 293.15;
+    double pressure = 0.0;
+    double porePressure = 0.0;
+    double activation = 0.0;
+};
+
+struct ConstitutiveDifferentialFP64 {
+    std::array<double, 9> passiveFirstPiola{};
+    std::array<double, 9> passiveTangent{};
+    std::array<double, 9> coupledFirstPiola{};
+    std::array<double, 9> coupledTangent{};
+    double determinant = 0.0;
+};
+
+[[nodiscard]] bool evaluateStateFreeConstitutiveDifferentialFP64(
+    const ConstitutiveProgram& program,
+    const ConstitutiveDifferentialInput& input,
+    ConstitutiveDifferentialFP64& output,
+    std::string* error = nullptr
+);
+
 struct ParticleSource {
     std::array<double, 3> position{};
     std::array<double, 3> velocity{};

@@ -1539,6 +1539,127 @@ kernel void nm_learned_differential_oracle(
     );
 }
 
+kernel void nm_mixed_differential_oracle(
+    device const NMMaterialGPU* materials [[buffer(0)]],
+    device const NMMixedMaterialGPU* mixedMaterials [[buffer(1)]],
+    device const NMScalarProgramGPU* programs [[buffer(2)]],
+    device const NMExpressionInstructionGPU* instructions [[buffer(3)]],
+    device const float* parameters [[buffer(4)]],
+    constant uint& sampleCount [[buffer(5)]],
+    device NMMixedDifferentialGPU* samples [[buffer(6)]],
+    uint global [[thread_position_in_grid]]
+) {
+    if (global >= sampleCount) return;
+    device NMMixedDifferentialGPU* sample = samples + global;
+    const uint materialIndex = sample->identity.x;
+    if (materialIndex >= sampleCount) {
+        sample->identity.y = 0u;
+        sample->diagnostics = float4(0.0f);
+        return;
+    }
+    const NMMaterialGPU material = materials[materialIndex];
+    const NMMixedMaterialGPU mixed = mixedMaterials[materialIndex];
+    const float3x3 deformation = matrixFromRows(
+        sample->deformationRow0,
+        sample->deformationRow1,
+        sample->deformationRow2
+    );
+    const float3x3 direction = matrixFromRows(
+        sample->directionRow0,
+        sample->directionRow1,
+        sample->directionRow2
+    );
+    const float3x3 deformationRate = matrixFromRows(
+        sample->deformationRateRow0,
+        sample->deformationRateRow1,
+        sample->deformationRateRow2
+    );
+    const float3x3 rateDirection = matrixFromRows(
+        sample->rateDirectionRow0,
+        sample->rateDirectionRow1,
+        sample->rateDirectionRow2
+    );
+    bool valid = material.stateCount == 0u &&
+        material.projectionKind == NM_MATERIAL_PROJECTION_GENERIC &&
+        material.constitutiveKind != NM_CONSTITUTIVE_POLYCONVEX_ICNN;
+    float3x3 passiveStress = float3x3(0.0f);
+    float3x3 passiveTangent = float3x3(0.0f);
+    device const float* internalState = nullptr;
+    if (valid) {
+        evaluateAlgorithmicStressTangent(
+            material,
+            programs,
+            instructions,
+            parameters,
+            internalState,
+            deformation,
+            direction,
+            deformationRate,
+            rateDirection,
+            sample->step.x,
+            sample->field.y,
+            passiveStress,
+            passiveTangent,
+            valid
+        );
+    }
+    float3x3 coupledStress = float3x3(0.0f);
+    float3x3 coupledTangent = float3x3(0.0f);
+    if (valid) {
+        coupledStress = mixedFirstPiola(
+            passiveStress,
+            deformation,
+            mixed,
+            sample->field.x,
+            sample->field.z,
+            sample->field.w
+        );
+        coupledTangent = mixedFirstPiolaTangent(
+            passiveStress,
+            passiveTangent,
+            deformation,
+            direction,
+            mixed,
+            sample->field.x,
+            sample->field.z,
+            sample->field.w
+        );
+        valid = isfinite(maximumAbs(coupledStress)) &&
+            isfinite(maximumAbs(coupledTangent));
+    }
+    matrixToRows(
+        passiveStress,
+        sample->passiveFirstPiolaRow0,
+        sample->passiveFirstPiolaRow1,
+        sample->passiveFirstPiolaRow2
+    );
+    matrixToRows(
+        passiveTangent,
+        sample->passiveTangentRow0,
+        sample->passiveTangentRow1,
+        sample->passiveTangentRow2
+    );
+    matrixToRows(
+        coupledStress,
+        sample->coupledFirstPiolaRow0,
+        sample->coupledFirstPiolaRow1,
+        sample->coupledFirstPiolaRow2
+    );
+    matrixToRows(
+        coupledTangent,
+        sample->coupledTangentRow0,
+        sample->coupledTangentRow1,
+        sample->coupledTangentRow2
+    );
+    sample->identity.y = valid ? 1u : 0u;
+    sample->diagnostics = float4(
+        determinant(deformation),
+        maximumAbs(coupledStress),
+        maximumAbs(coupledTangent),
+        valid ? 1.0f : 0.0f
+    );
+}
+
 inline float4 fusedFEMOperatorAtNode(
     const NMMatterDispatchGPU dispatch,
     const NMMicrostepGPU microstep,

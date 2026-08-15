@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -293,11 +294,288 @@ std::uint64_t fingerprintFields(
     return result;
 }
 
+using Matrix = std::array<double, 9>;
+
+nm_float4 row(const Matrix& value, const std::size_t index) {
+    return {
+        static_cast<float>(value[3u * index + 0u]),
+        static_cast<float>(value[3u * index + 1u]),
+        static_cast<float>(value[3u * index + 2u]),
+        0.0f,
+    };
+}
+
+Matrix matrix(
+    const nm_float4& row0,
+    const nm_float4& row1,
+    const nm_float4& row2
+) {
+    return {
+        row0.x, row0.y, row0.z,
+        row1.x, row1.y, row1.z,
+        row2.x, row2.y, row2.z,
+    };
+}
+
+double maximumNormalizedError(
+    const Matrix& candidate,
+    const Matrix& reference
+) {
+    double result = 0.0;
+    for (std::size_t index = 0u; index < candidate.size(); ++index) {
+        const double scale = std::max({
+            1.0, std::abs(candidate[index]), std::abs(reference[index])
+        });
+        result = std::max(
+            result,
+            std::abs(candidate[index] - reference[index]) / scale
+        );
+    }
+    return result;
+}
+
+struct ConstitutiveParity {
+    double passiveStressError = 0.0;
+    double passiveTangentError = 0.0;
+    double coupledStressError = 0.0;
+    double coupledTangentError = 0.0;
+    double fp64DirectionalError = 0.0;
+};
+
+ConstitutiveParity qualifyConstitutiveParity(
+    const numi::matter::CompiledWorld& world
+) {
+    require(world.materials.size() == 4u &&
+            world.mixedMaterials.size() == 4u &&
+            world.constitutive.size() == 4u,
+        "perfused tissue FP64 qualification requires four routed layers");
+    std::array<numi::matter::ConstitutiveDifferentialInput, 4> inputs{};
+    std::array<numi::matter::ConstitutiveDifferentialFP64, 4> references{};
+    std::array<NMMixedDifferentialGPU, 4> samples{};
+    ConstitutiveParity result;
+    for (std::size_t layerIndex = 0u; layerIndex < inputs.size(); ++layerIndex) {
+        auto& input = inputs[layerIndex];
+        input.deformation = {
+            1.040 + 0.005 * static_cast<double>(layerIndex), 0.015, -0.007,
+            0.010, 0.970 + 0.004 * static_cast<double>(layerIndex), 0.012,
+            0.006, -0.008, 1.015,
+        };
+        input.deformationDirection = {
+            0.025, -0.012, 0.008,
+            0.005, 0.018, -0.006,
+            -0.009, 0.004, 0.015,
+        };
+        input.timestep = 1.0 / 4000.0;
+        input.temperature = world.materials[layerIndex].bulk.y;
+        input.pressure = 250.0 + 50.0 * static_cast<double>(layerIndex);
+        input.porePressure = 1000.0;
+        input.activation = 0.15 + 0.12 * static_cast<double>(layerIndex);
+        std::string error;
+        require(numi::matter::evaluateStateFreeConstitutiveDifferentialFP64(
+            world.constitutive[layerIndex], input, references[layerIndex],
+            &error), error);
+
+        constexpr double directionalStep = 2.0e-6;
+        auto plus = input;
+        auto minus = input;
+        for (std::size_t component = 0u; component < 9u; ++component) {
+            plus.deformation[component] +=
+                directionalStep * input.deformationDirection[component];
+            minus.deformation[component] -=
+                directionalStep * input.deformationDirection[component];
+        }
+        numi::matter::ConstitutiveDifferentialFP64 plusReference;
+        numi::matter::ConstitutiveDifferentialFP64 minusReference;
+        require(numi::matter::evaluateStateFreeConstitutiveDifferentialFP64(
+                    world.constitutive[layerIndex], plus, plusReference, &error) &&
+                numi::matter::evaluateStateFreeConstitutiveDifferentialFP64(
+                    world.constitutive[layerIndex], minus, minusReference, &error),
+            error);
+        Matrix finiteDifference{};
+        for (std::size_t component = 0u; component < 9u; ++component) {
+            finiteDifference[component] =
+                (plusReference.coupledFirstPiola[component] -
+                 minusReference.coupledFirstPiola[component]) /
+                (2.0 * directionalStep);
+        }
+        result.fp64DirectionalError = std::max(
+            result.fp64DirectionalError,
+            maximumNormalizedError(
+                finiteDifference, references[layerIndex].coupledTangent
+            )
+        );
+
+        auto& sample = samples[layerIndex];
+        sample.identity = {
+            static_cast<std::uint32_t>(layerIndex), 0u, 0u, 0u
+        };
+        sample.deformationRow0 = row(input.deformation, 0u);
+        sample.deformationRow1 = row(input.deformation, 1u);
+        sample.deformationRow2 = row(input.deformation, 2u);
+        sample.directionRow0 = row(input.deformationDirection, 0u);
+        sample.directionRow1 = row(input.deformationDirection, 1u);
+        sample.directionRow2 = row(input.deformationDirection, 2u);
+        sample.deformationRateRow0 = row(input.deformationRate, 0u);
+        sample.deformationRateRow1 = row(input.deformationRate, 1u);
+        sample.deformationRateRow2 = row(input.deformationRate, 2u);
+        sample.rateDirectionRow0 = row(input.rateDirection, 0u);
+        sample.rateDirectionRow1 = row(input.rateDirection, 1u);
+        sample.rateDirectionRow2 = row(input.rateDirection, 2u);
+        sample.field = {
+            static_cast<float>(input.pressure),
+            static_cast<float>(input.temperature),
+            static_cast<float>(input.porePressure),
+            static_cast<float>(input.activation),
+        };
+        sample.step = {static_cast<float>(input.timestep), 0.0f, 0.0f, 0.0f};
+    }
+
+    @autoreleasepool {
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        require(device != nil, "no Metal device for perfused FP64 parity");
+        NSError* error = nil;
+        id<MTLLibrary> library = [device
+            newLibraryWithURL:[NSURL fileURLWithPath:@NUMI_MATTER_METALLIB]
+                       error:&error];
+        require(library != nil, "could not load perfused FP64 parity metallib");
+        id<MTLFunction> function = [library newFunctionWithName:
+            @"numi_matter_metal::nm_mixed_differential_oracle"];
+        require(function != nil, "mixed differential oracle kernel is missing");
+        id<MTLComputePipelineState> pipeline = [device
+            newComputePipelineStateWithFunction:function error:&error];
+        require(pipeline != nil,
+            "could not compile mixed differential oracle pipeline");
+        const auto buffer = [&](const void* data, const NSUInteger bytes) {
+            id<MTLBuffer> value = [device newBufferWithBytes:data length:bytes
+                options:MTLResourceStorageModeShared];
+            require(value != nil, "perfused FP64 parity buffer allocation failed");
+            return value;
+        };
+        std::vector<float> parameters;
+        parameters.reserve(world.parameters.size());
+        for (const NMParameterRangeGPU& parameter : world.parameters) {
+            parameters.push_back(parameter.valueAndBounds.x);
+        }
+        id<MTLBuffer> materialBuffer = buffer(
+            world.materials.data(),
+            world.materials.size() * sizeof(NMMaterialGPU)
+        );
+        id<MTLBuffer> mixedBuffer = buffer(
+            world.mixedMaterials.data(),
+            world.mixedMaterials.size() * sizeof(NMMixedMaterialGPU)
+        );
+        id<MTLBuffer> programBuffer = buffer(
+            world.scalarPrograms.data(),
+            world.scalarPrograms.size() * sizeof(NMScalarProgramGPU)
+        );
+        id<MTLBuffer> instructionBuffer = buffer(
+            world.instructions.data(),
+            world.instructions.size() * sizeof(NMExpressionInstructionGPU)
+        );
+        id<MTLBuffer> parameterBuffer = buffer(
+            parameters.data(), parameters.size() * sizeof(float)
+        );
+        id<MTLBuffer> sampleBuffer = buffer(samples.data(), sizeof(samples));
+        const std::uint32_t sampleCount =
+            static_cast<std::uint32_t>(samples.size());
+        id<MTLCommandQueue> queue = [device newCommandQueue];
+        id<MTLCommandBuffer> command = [queue commandBuffer];
+        id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
+        [encoder setComputePipelineState:pipeline];
+        [encoder setBuffer:materialBuffer offset:0u atIndex:0u];
+        [encoder setBuffer:mixedBuffer offset:0u atIndex:1u];
+        [encoder setBuffer:programBuffer offset:0u atIndex:2u];
+        [encoder setBuffer:instructionBuffer offset:0u atIndex:3u];
+        [encoder setBuffer:parameterBuffer offset:0u atIndex:4u];
+        [encoder setBytes:&sampleCount length:sizeof(sampleCount) atIndex:5u];
+        [encoder setBuffer:sampleBuffer offset:0u atIndex:6u];
+        [encoder dispatchThreads:MTLSizeMake(sampleCount, 1u, 1u)
+          threadsPerThreadgroup:MTLSizeMake(sampleCount, 1u, 1u)];
+        [encoder endEncoding];
+        [command commit];
+        [command waitUntilCompleted];
+        require(command.status == MTLCommandBufferStatusCompleted,
+            "perfused FP64 parity Metal command failed");
+        const auto* gpu = static_cast<const NMMixedDifferentialGPU*>(
+            sampleBuffer.contents
+        );
+        for (std::size_t layerIndex = 0u;
+             layerIndex < references.size(); ++layerIndex) {
+            require(gpu[layerIndex].identity.y == 1u &&
+                    gpu[layerIndex].diagnostics.w > 0.5f,
+                "Metal mixed differential rejected a perfused layer");
+            const auto& reference = references[layerIndex];
+            result.passiveStressError = std::max(
+                result.passiveStressError,
+                maximumNormalizedError(
+                    matrix(
+                        gpu[layerIndex].passiveFirstPiolaRow0,
+                        gpu[layerIndex].passiveFirstPiolaRow1,
+                        gpu[layerIndex].passiveFirstPiolaRow2
+                    ),
+                    reference.passiveFirstPiola
+                )
+            );
+            result.passiveTangentError = std::max(
+                result.passiveTangentError,
+                maximumNormalizedError(
+                    matrix(
+                        gpu[layerIndex].passiveTangentRow0,
+                        gpu[layerIndex].passiveTangentRow1,
+                        gpu[layerIndex].passiveTangentRow2
+                    ),
+                    reference.passiveTangent
+                )
+            );
+            result.coupledStressError = std::max(
+                result.coupledStressError,
+                maximumNormalizedError(
+                    matrix(
+                        gpu[layerIndex].coupledFirstPiolaRow0,
+                        gpu[layerIndex].coupledFirstPiolaRow1,
+                        gpu[layerIndex].coupledFirstPiolaRow2
+                    ),
+                    reference.coupledFirstPiola
+                )
+            );
+            result.coupledTangentError = std::max(
+                result.coupledTangentError,
+                maximumNormalizedError(
+                    matrix(
+                        gpu[layerIndex].coupledTangentRow0,
+                        gpu[layerIndex].coupledTangentRow1,
+                        gpu[layerIndex].coupledTangentRow2
+                    ),
+                    reference.coupledTangent
+                )
+            );
+        }
+    }
+    // The 3e-5 passive envelope includes the authored-double to cooked-float
+    // parameter quantization at a one-pascal normalization floor. The mixed
+    // response and directional derivative retain their own tighter gates.
+    require(result.passiveStressError <= 3.0e-5 &&
+            result.passiveTangentError <= 3.0e-5 &&
+            result.coupledStressError <= 3.0e-5 &&
+            result.coupledTangentError <= 5.0e-5 &&
+            result.fp64DirectionalError <= 2.0e-6,
+        "four-layer Metal constitutive response exceeded FP64 parity bounds: "
+        "passive_stress=" + std::to_string(result.passiveStressError) +
+        " passive_tangent=" + std::to_string(result.passiveTangentError) +
+        " coupled_stress=" + std::to_string(result.coupledStressError) +
+        " coupled_tangent=" + std::to_string(result.coupledTangentError) +
+        " fp64_directional=" +
+            std::to_string(result.fp64DirectionalError));
+    return result;
+}
+
 } // namespace
 
 int main() {
     try {
         const auto prepared = prepareTissue();
+        const ConstitutiveParity parity =
+            qualifyConstitutiveParity(prepared.world);
         const TissueRun first = runTissue(prepared.world);
         const TissueRun replay = runTissue(prepared.world);
         require(bitIdentical(first.snapshot.femNodes, replay.snapshot.femNodes) &&
@@ -329,6 +607,16 @@ int main() {
             << ",\"completed_microsteps\":"
             << first.completedMicrosteps
             << ",\"fgmres_iterations\":" << first.fgmresIterations
+            << ",\"passive_stress_fp64_error\":"
+            << parity.passiveStressError
+            << ",\"passive_tangent_fp64_error\":"
+            << parity.passiveTangentError
+            << ",\"coupled_stress_fp64_error\":"
+            << parity.coupledStressError
+            << ",\"coupled_tangent_fp64_error\":"
+            << parity.coupledTangentError
+            << ",\"fp64_directional_error\":"
+            << parity.fp64DirectionalError
             << ",\"gpu_ms\":" << first.gpuMilliseconds
             << ",\"mutation_enabled\":false"
             << ",\"failed_steps\":0}\n";

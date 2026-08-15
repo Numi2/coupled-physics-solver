@@ -560,6 +560,44 @@ typedef struct NM_ALIGN16 NMLearnedDifferentialGPU {
     nm_float4 diagnostics;
 } NMLearnedDifferentialGPU;
 
+// State-free constitutive qualification sample. The live Metal evaluator
+// consumes compiled material bytecode and mixed coefficients, while the host
+// compares these row-major outputs with an independent FP64 scalar reference.
+typedef struct NM_ALIGN16 NMMixedDifferentialGPU {
+    // material index, valid flag on output, reserved, reserved.
+    nm_uint4 identity;
+    nm_float4 deformationRow0;
+    nm_float4 deformationRow1;
+    nm_float4 deformationRow2;
+    nm_float4 directionRow0;
+    nm_float4 directionRow1;
+    nm_float4 directionRow2;
+    nm_float4 deformationRateRow0;
+    nm_float4 deformationRateRow1;
+    nm_float4 deformationRateRow2;
+    nm_float4 rateDirectionRow0;
+    nm_float4 rateDirectionRow1;
+    nm_float4 rateDirectionRow2;
+    // mechanical pressure, material temperature, pore pressure, activation.
+    nm_float4 field;
+    // timestep, reserved, reserved, reserved.
+    nm_float4 step;
+    nm_float4 passiveFirstPiolaRow0;
+    nm_float4 passiveFirstPiolaRow1;
+    nm_float4 passiveFirstPiolaRow2;
+    nm_float4 passiveTangentRow0;
+    nm_float4 passiveTangentRow1;
+    nm_float4 passiveTangentRow2;
+    nm_float4 coupledFirstPiolaRow0;
+    nm_float4 coupledFirstPiolaRow1;
+    nm_float4 coupledFirstPiolaRow2;
+    nm_float4 coupledTangentRow0;
+    nm_float4 coupledTangentRow1;
+    nm_float4 coupledTangentRow2;
+    // determinant, max coupled stress, max coupled tangent, valid flag.
+    nm_float4 diagnostics;
+} NMMixedDifferentialGPU;
+
 typedef struct NM_ALIGN16 NMSolverCertificateGPU {
     // nonlinear residual, relative correction, volume residual, pressure residual.
     nm_float4 nonlinear;
