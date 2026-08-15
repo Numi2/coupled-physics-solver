@@ -21,6 +21,30 @@ constexpr double kMinimumDimension = 1.0e-9;
     return value.value > 0.0 && std::isfinite(value.value);
 }
 
+[[nodiscard]] bool validIdentified(
+    const IdentifiedJejunalScalar& value,
+    const bool positive
+) {
+    return value.basis != IdentifiedJejunalBasis::unset &&
+        !value.evidenceId.empty() &&
+        std::isfinite(value.value) &&
+        std::isfinite(value.lowerBound) &&
+        std::isfinite(value.upperBound) &&
+        value.lowerBound <= value.value &&
+        value.value <= value.upperBound &&
+        (!positive || value.lowerBound > 0.0);
+}
+
+[[nodiscard]] bool validHash(const std::string_view value) {
+    return value.size() == 64u && std::ranges::all_of(
+        value,
+        [](const char character) {
+            return (character >= '0' && character <= '9') ||
+                (character >= 'a' && character <= 'f');
+        }
+    );
+}
+
 [[nodiscard]] double tetrahedronVolume(
     const std::array<double, 3>& a,
     const std::array<double, 3>& b,
@@ -71,6 +95,288 @@ constexpr double kMinimumDimension = 1.0e-9;
 }
 
 } // namespace
+
+std::string_view identifiedJejunalBasisName(
+    const IdentifiedJejunalBasis basis
+) noexcept {
+    switch (basis) {
+    case IdentifiedJejunalBasis::unset: return "unset";
+    case IdentifiedJejunalBasis::trialMeasured: return "trial-measured";
+    case IdentifiedJejunalBasis::hierarchicalFit: return "hierarchical-fit";
+    case IdentifiedJejunalBasis::derivedGeometry: return "derived-geometry";
+    case IdentifiedJejunalBasis::boundedPrior: return "bounded-prior";
+    }
+    return "invalid";
+}
+
+std::string_view jejunalLayerName(const JejunalLayer layer) noexcept {
+    switch (layer) {
+    case JejunalLayer::mucosaSubmucosa: return "mucosa-submucosa";
+    case JejunalLayer::circularMuscle: return "circular-muscle";
+    case JejunalLayer::longitudinalMuscle: return "longitudinal-muscle";
+    case JejunalLayer::serosa: return "serosa";
+    }
+    return "invalid";
+}
+
+bool validatePerfusedActiveJejunumSpec(
+    const PerfusedActiveJejunumSpec& spec,
+    std::string* error
+) {
+    const auto fail = [&](const std::string& message) {
+        if (error != nullptr) *error = message;
+        return false;
+    };
+    if (!validHash(spec.trialManifestSha256) ||
+        !validHash(spec.parameterBundleSha256)) {
+        return fail(
+            "perfused-active jejunum requires trial-manifest and parameter-bundle SHA-256 provenance"
+        );
+    }
+    const std::array<const IdentifiedJejunalScalar*, 9> globalScalars{{
+        &spec.lengthM,
+        &spec.widthM,
+        &spec.thicknessM,
+        &spec.incisionLengthM,
+        &spec.incisionGapM,
+        &spec.perfusionTemperatureK,
+        &spec.arterialPressurePa,
+        &spec.perfusateFlowM3PerS,
+        &spec.initialPorePressurePa,
+    }};
+    for (const auto* scalar : globalScalars) {
+        if (!validIdentified(*scalar, true)) {
+            return fail(
+                "every perfused-active geometry and perfusion scalar requires a positive bounded value and evidence owner"
+            );
+        }
+    }
+    if (spec.incisionLengthM.value >= spec.lengthM.value ||
+        spec.incisionGapM.value >= spec.widthM.value ||
+        spec.longitudinalCells < 4u ||
+        spec.longitudinalCells > 256u ||
+        spec.circumferentialCells < 4u ||
+        spec.circumferentialCells > 256u ||
+        spec.circumferentialCells % 2u != 0u ||
+        spec.throughThicknessCells < 4u ||
+        spec.throughThicknessCells > 64u) {
+        return fail(
+            "perfused-active jejunum geometry or four-layer mesh resolution is invalid"
+        );
+    }
+
+    std::array<bool, 4> ownedLayers{};
+    double thicknessSum = 0.0;
+    for (const auto& layer : spec.layers) {
+        const auto layerIndex = static_cast<std::uint32_t>(layer.layer);
+        if (layerIndex >= ownedLayers.size() || ownedLayers[layerIndex]) {
+            return fail("perfused-active jejunum layers must own each canonical layer exactly once");
+        }
+        ownedLayers[layerIndex] = true;
+        const std::array<const IdentifiedJejunalScalar*, 22> layerScalars{{
+            &layer.thicknessFraction,
+            &layer.densityKgPerM3,
+            &layer.fungCpa,
+            &layer.longitudinalCoefficient,
+            &layer.circumferentialCoefficient,
+            &layer.couplingCoefficient,
+            &layer.groundShearPa,
+            &layer.viscosityPaS,
+            &layer.bulkModulusPa,
+            &layer.poreStoragePerPa,
+            &layer.poreMobilityM2PerPaS,
+            &layer.electricalConductivitySPerM,
+            &layer.activationDiffusivityM2PerS,
+            &layer.activationOnRatePerS,
+            &layer.activationOffRatePerS,
+            &layer.maximumActiveTensionPa,
+            &layer.activationSlopePerV,
+            &layer.cohesiveStrengthPa,
+            &layer.fractureEnergyJPerM2,
+            &layer.staticFriction,
+            &layer.dynamicFriction,
+            &layer.activationThresholdV,
+        }};
+        if (!std::ranges::all_of(layerScalars, [](const auto* value) {
+                return validIdentified(*value, false);
+            })) {
+            return fail("every layer scalar requires bounded provenance");
+        }
+        const std::array<const IdentifiedJejunalScalar*, 12> strictlyPositive{{
+            &layer.thicknessFraction,
+            &layer.densityKgPerM3,
+            &layer.fungCpa,
+            &layer.longitudinalCoefficient,
+            &layer.circumferentialCoefficient,
+            &layer.groundShearPa,
+            &layer.viscosityPaS,
+            &layer.bulkModulusPa,
+            &layer.poreStoragePerPa,
+            &layer.activationSlopePerV,
+            &layer.cohesiveStrengthPa,
+            &layer.fractureEnergyJPerM2,
+        }};
+        if (!std::ranges::all_of(strictlyPositive, [](const auto* value) {
+                return value->lowerBound > 0.0;
+            })) {
+            return fail("layer mechanical, storage, damage, and slope parameters must be strictly positive");
+        }
+        const std::array<const IdentifiedJejunalScalar*, 9> nonnegative{{
+            &layer.couplingCoefficient,
+            &layer.poreMobilityM2PerPaS,
+            &layer.electricalConductivitySPerM,
+            &layer.activationDiffusivityM2PerS,
+            &layer.activationOnRatePerS,
+            &layer.activationOffRatePerS,
+            &layer.maximumActiveTensionPa,
+            &layer.staticFriction,
+            &layer.dynamicFriction,
+        }};
+        if (!std::ranges::all_of(nonnegative, [](const auto* value) {
+                return value->lowerBound >= 0.0;
+            })) {
+            return fail("layer coupling, transport, activation, and friction parameters must be nonnegative");
+        }
+        const bool muscle =
+            layer.layer == JejunalLayer::circularMuscle ||
+            layer.layer == JejunalLayer::longitudinalMuscle;
+        if (muscle && layer.maximumActiveTensionPa.lowerBound <= 0.0) {
+            return fail("both canonical muscle layers require positive identified active tension");
+        }
+        if (layer.dynamicFriction.value > layer.staticFriction.value ||
+            layer.staticFriction.value > 2.0 ||
+            layer.thicknessFraction.value >= 1.0) {
+            return fail("layer fractions or friction coefficients are physically inconsistent");
+        }
+        const double fibreNorm = std::sqrt(
+            layer.fibreDirection[0] * layer.fibreDirection[0] +
+            layer.fibreDirection[1] * layer.fibreDirection[1] +
+            layer.fibreDirection[2] * layer.fibreDirection[2]
+        );
+        if (!std::isfinite(fibreNorm) || std::abs(fibreNorm - 1.0) > 1.0e-6) {
+            return fail("layer fibre direction must be finite and unit length");
+        }
+        thicknessSum += layer.thicknessFraction.value;
+    }
+    if (!std::ranges::all_of(ownedLayers, [](const bool value) { return value; }) ||
+        std::abs(thicknessSum - 1.0) > 1.0e-6) {
+        return fail("four canonical layer thickness fractions must sum to one");
+    }
+    if (error != nullptr) error->clear();
+    return true;
+}
+
+bool configurePerfusedActiveJejunumLayerMaterial(
+    MaterialProgram& material,
+    const PerfusedJejunalLayerSpec& layer,
+    std::string* error
+) {
+    if (jejunalLayerName(layer.layer) == "invalid") {
+        if (error != nullptr) *error = "perfused jejunum layer identifier is invalid";
+        return false;
+    }
+    const std::array<const IdentifiedJejunalScalar*, 21> required{{
+        &layer.densityKgPerM3,
+        &layer.fungCpa,
+        &layer.longitudinalCoefficient,
+        &layer.circumferentialCoefficient,
+        &layer.couplingCoefficient,
+        &layer.groundShearPa,
+        &layer.viscosityPaS,
+        &layer.bulkModulusPa,
+        &layer.poreStoragePerPa,
+        &layer.poreMobilityM2PerPaS,
+        &layer.electricalConductivitySPerM,
+        &layer.activationDiffusivityM2PerS,
+        &layer.activationOnRatePerS,
+        &layer.activationOffRatePerS,
+        &layer.maximumActiveTensionPa,
+        &layer.activationThresholdV,
+        &layer.activationSlopePerV,
+        &layer.cohesiveStrengthPa,
+        &layer.fractureEnergyJPerM2,
+        &layer.staticFriction,
+        &layer.dynamicFriction,
+    }};
+    const double fibreNorm = std::sqrt(
+        layer.fibreDirection[0] * layer.fibreDirection[0] +
+        layer.fibreDirection[1] * layer.fibreDirection[1] +
+        layer.fibreDirection[2] * layer.fibreDirection[2]
+    );
+    const bool muscle =
+        layer.layer == JejunalLayer::circularMuscle ||
+        layer.layer == JejunalLayer::longitudinalMuscle;
+    if (!std::ranges::all_of(required, [](const auto* value) {
+            return validIdentified(*value, false);
+        }) ||
+        layer.densityKgPerM3.value <= 0.0 ||
+        layer.fungCpa.value <= 0.0 ||
+        layer.longitudinalCoefficient.value <= 0.0 ||
+        layer.circumferentialCoefficient.value <= 0.0 ||
+        layer.couplingCoefficient.value < 0.0 ||
+        layer.groundShearPa.value <= 0.0 ||
+        layer.viscosityPaS.value <= 0.0 ||
+        layer.bulkModulusPa.value <= 0.0 ||
+        layer.poreStoragePerPa.value <= 0.0 ||
+        layer.poreMobilityM2PerPaS.value < 0.0 ||
+        layer.electricalConductivitySPerM.value < 0.0 ||
+        layer.activationDiffusivityM2PerS.value < 0.0 ||
+        layer.activationOnRatePerS.value < 0.0 ||
+        layer.activationOffRatePerS.value < 0.0 ||
+        layer.maximumActiveTensionPa.value < 0.0 ||
+        layer.activationSlopePerV.value <= 0.0 ||
+        layer.cohesiveStrengthPa.value <= 0.0 ||
+        layer.fractureEnergyJPerM2.value <= 0.0 ||
+        layer.staticFriction.value < 0.0 ||
+        layer.dynamicFriction.value < 0.0 ||
+        layer.dynamicFriction.value > layer.staticFriction.value ||
+        (muscle && layer.maximumActiveTensionPa.value <= 0.0) ||
+        !std::isfinite(fibreNorm) || std::abs(fibreNorm - 1.0) > 1.0e-6) {
+        if (error != nullptr) {
+            *error = "perfused jejunum layer contains an unowned or invalid identified value";
+        }
+        return false;
+    }
+
+    MaterialProgram staged = material;
+    const bool configured =
+        staged.name == "porcine_jejunum_fung" &&
+        setParameter(staged, "density", layer.densityKgPerM3.value) &&
+        setParameter(staged, "fung_c", layer.fungCpa.value) &&
+        setParameter(staged, "a_longitudinal", layer.longitudinalCoefficient.value) &&
+        setParameter(staged, "a_circumferential", layer.circumferentialCoefficient.value) &&
+        setParameter(staged, "a_coupling", layer.couplingCoefficient.value) &&
+        setParameter(staged, "ground_shear", layer.groundShearPa.value) &&
+        setParameter(staged, "numerical_viscosity", layer.viscosityPaS.value);
+    if (!configured) {
+        if (error != nullptr) {
+            *error = "material is not the porcine jejunum program or a layer value is outside its compiled range";
+        }
+        return false;
+    }
+    staged.name = "porcine_jejunum_perfused_" +
+        std::string(jejunalLayerName(layer.layer));
+    staged.mixed.bulkModulus = layer.bulkModulusPa.value;
+    staged.mixed.poreStorage = layer.poreStoragePerPa.value;
+    staged.mixed.poreMobility = layer.poreMobilityM2PerPaS.value;
+    staged.mixed.electricalConductivity =
+        layer.electricalConductivitySPerM.value;
+    staged.mixed.activationDiffusivity =
+        layer.activationDiffusivityM2PerS.value;
+    staged.mixed.activationOnRate = layer.activationOnRatePerS.value;
+    staged.mixed.activationOffRate = layer.activationOffRatePerS.value;
+    staged.mixed.maximumActiveTension = layer.maximumActiveTensionPa.value;
+    staged.mixed.activationThreshold = layer.activationThresholdV.value;
+    staged.mixed.activationSlope = layer.activationSlopePerV.value;
+    staged.mixed.cohesiveStrength = layer.cohesiveStrengthPa.value;
+    staged.mixed.fractureEnergy = layer.fractureEnergyJPerM2.value;
+    staged.mixed.fibreDirection = layer.fibreDirection;
+    staged.staticFriction = layer.staticFriction.value;
+    staged.dynamicFriction = layer.dynamicFriction.value;
+    material = std::move(staged);
+    if (error != nullptr) error->clear();
+    return true;
+}
 
 std::string_view jejunalValueBasisName(
     const JejunalValueBasis basis

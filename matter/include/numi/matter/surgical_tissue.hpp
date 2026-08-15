@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -122,6 +123,103 @@ struct PorcineJejunumClosureCoupon {
     PorcineJejunumFungSpec spec;
     PorcineJejunumClosureMetadata metadata;
 };
+
+enum class IdentifiedJejunalBasis : std::uint32_t {
+    unset = 0u,
+    trialMeasured = 1u,
+    hierarchicalFit = 2u,
+    derivedGeometry = 3u,
+    boundedPrior = 4u,
+};
+
+struct IdentifiedJejunalScalar {
+    double value = std::numeric_limits<double>::quiet_NaN();
+    double lowerBound = std::numeric_limits<double>::quiet_NaN();
+    double upperBound = std::numeric_limits<double>::quiet_NaN();
+    IdentifiedJejunalBasis basis = IdentifiedJejunalBasis::unset;
+    // SHA-256 of the trial manifest or parameter bundle that owns this value.
+    std::string evidenceId;
+};
+
+enum class JejunalLayer : std::uint32_t {
+    mucosaSubmucosa = 0u,
+    circularMuscle = 1u,
+    longitudinalMuscle = 2u,
+    serosa = 3u,
+};
+
+struct PerfusedJejunalLayerSpec {
+    JejunalLayer layer = JejunalLayer::mucosaSubmucosa;
+    IdentifiedJejunalScalar thicknessFraction;
+    IdentifiedJejunalScalar densityKgPerM3;
+    IdentifiedJejunalScalar fungCpa;
+    IdentifiedJejunalScalar longitudinalCoefficient;
+    IdentifiedJejunalScalar circumferentialCoefficient;
+    IdentifiedJejunalScalar couplingCoefficient;
+    IdentifiedJejunalScalar groundShearPa;
+    IdentifiedJejunalScalar viscosityPaS;
+    IdentifiedJejunalScalar bulkModulusPa;
+    IdentifiedJejunalScalar poreStoragePerPa;
+    IdentifiedJejunalScalar poreMobilityM2PerPaS;
+    IdentifiedJejunalScalar electricalConductivitySPerM;
+    IdentifiedJejunalScalar activationDiffusivityM2PerS;
+    IdentifiedJejunalScalar activationOnRatePerS;
+    IdentifiedJejunalScalar activationOffRatePerS;
+    IdentifiedJejunalScalar maximumActiveTensionPa;
+    IdentifiedJejunalScalar activationThresholdV;
+    IdentifiedJejunalScalar activationSlopePerV;
+    IdentifiedJejunalScalar cohesiveStrengthPa;
+    IdentifiedJejunalScalar fractureEnergyJPerM2;
+    IdentifiedJejunalScalar staticFriction;
+    IdentifiedJejunalScalar dynamicFriction;
+    std::array<double, 3> fibreDirection{1.0, 0.0, 0.0};
+};
+
+// No field has a numerical default: constructing this type cannot silently
+// publish a living-tissue material. It becomes authorable only after every
+// scalar has bounded provenance and the referenced immutable evidence exists.
+struct PerfusedActiveJejunumSpec {
+    std::string trialManifestSha256;
+    std::string parameterBundleSha256;
+    IdentifiedJejunalScalar lengthM;
+    IdentifiedJejunalScalar widthM;
+    IdentifiedJejunalScalar thicknessM;
+    IdentifiedJejunalScalar incisionLengthM;
+    IdentifiedJejunalScalar incisionGapM;
+    IdentifiedJejunalScalar perfusionTemperatureK;
+    IdentifiedJejunalScalar arterialPressurePa;
+    IdentifiedJejunalScalar perfusateFlowM3PerS;
+    IdentifiedJejunalScalar initialPorePressurePa;
+    std::array<PerfusedJejunalLayerSpec, 4> layers{};
+    std::uint32_t longitudinalCells = 0u;
+    std::uint32_t circumferentialCells = 0u;
+    std::uint32_t throughThicknessCells = 0u;
+};
+
+[[nodiscard]] std::string_view identifiedJejunalBasisName(
+    IdentifiedJejunalBasis basis
+) noexcept;
+
+[[nodiscard]] std::string_view jejunalLayerName(JejunalLayer layer) noexcept;
+
+// Validates provenance, uncertainty intervals, complete four-layer ownership,
+// geometry resolution, fibre frames, perfusion and active-physics fields.
+// It deliberately does not compare against physical outcomes; that authority
+// belongs to a PhysicsEvidence artifact produced after replay.
+[[nodiscard]] bool validatePerfusedActiveJejunumSpec(
+    const PerfusedActiveJejunumSpec& spec,
+    std::string* error = nullptr
+);
+
+// Applies one identified layer to a cloned porcine-jejunum constitutive
+// program. Publication is transactional and changes the material name so each
+// layer retains a distinct fingerprint. Mesh routing is a separate compile
+// boundary; this function does not collapse four layers into one material.
+[[nodiscard]] bool configurePerfusedActiveJejunumLayerMaterial(
+    MaterialProgram& material,
+    const PerfusedJejunalLayerSpec& layer,
+    std::string* error = nullptr
+);
 
 // Applies the source coefficients and explicit 3-D regularization settings to
 // a parsed porcine_jejunum_fung material. Publication is transactional.

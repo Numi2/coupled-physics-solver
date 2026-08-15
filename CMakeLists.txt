@@ -192,6 +192,13 @@ target_compile_options(coupled_trial_evidence_probe PRIVATE -fobjc-arc)
 
 coupled_probe(coupled_trial_check apps/trial_check.cpp)
 
+coupled_probe(
+    coupled_perfused_active_tissue_contract_probe
+    apps/perfused_active_tissue_contract_probe.cpp)
+target_compile_definitions(
+    coupled_perfused_active_tissue_contract_probe
+    PRIVATE NUMI_JEJUNUM_MATERIAL="${CMAKE_CURRENT_SOURCE_DIR}/matter/materials/porcine_jejunum_fung.nmatter")
+
 if(BUILD_TESTING)
     add_test(NAME coupled.matter.metal_world
         COMMAND $<TARGET_FILE:coupled_matter_physics_probe> --metal-world-coupling)
@@ -199,9 +206,12 @@ if(BUILD_TESTING)
         COMMAND $<TARGET_FILE:coupled_suture_handoff_probe> --tissue-coupling-only)
     add_test(NAME coupled.evidence.trial_contract
         COMMAND $<TARGET_FILE:coupled_trial_evidence_probe>)
+    add_test(NAME coupled.tissue.perfused_active_contract
+        COMMAND $<TARGET_FILE:coupled_perfused_active_tissue_contract_probe>)
     set_tests_properties(
         coupled.matter.metal_world
         coupled.suture.tissue_coupling
         coupled.evidence.trial_contract
+        coupled.tissue.perfused_active_contract
         PROPERTIES LABELS "coupled;metal;physics" TIMEOUT 300)
 endif()
