@@ -3109,6 +3109,7 @@ RuntimeDiagnostics Runtime::encode(const EncodeRequest& request) {
                         [encoder setBuffer:state.statuses offset:0u atIndex:6u];
                         [encoder setBuffer:state.femTopologyNodesCandidate
                                      offset:0u atIndex:7u];
+                        [encoder setBuffer:state.objects offset:0u atIndex:8u];
                     }
                 );
                 dispatchThreads(

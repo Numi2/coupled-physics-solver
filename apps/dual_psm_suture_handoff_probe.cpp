@@ -118,6 +118,10 @@ constexpr std::uint32_t kCurvedPassageContactSegmentCount = 2u;
 // every tissue boundary node while the live rod remains the sole strand state
 // authority.
 constexpr std::uint32_t kSutureMatterContactSegmentCount = 2u;
+// The layered direct-contact coupon sits beneath edges 3-4 so its operative
+// surface is clear of the larger needle/swage while remaining on the same
+// continuous, hard-swaged DER strand.
+constexpr std::uint32_t kPerfusedSutureContactEdgeBegin = 3u;
 // Matter is quasi-static relative to the 16 kHz DER flexural cadence. During
 // continuous pull-through it samples every rod substep (16 kHz): the 20 mm/s
 // entry moves 1.25 um per coupled solve, one eightieth of the 100 um IPC band.
@@ -132,6 +136,7 @@ constexpr std::uint32_t kSuturePassageMatterRateMultiplier = 4u;
 constexpr double kSuturePullThroughSpeedMps = 8.0e-2;
 constexpr double kSutureOperativeFieldRadiusM = 4.5e-3;
 constexpr double kSutureTissueContactSlopM = 1.0e-4;
+constexpr double kPerfusedDirectContactInitialClearanceM = 7.5e-5;
 // The receiver-frame construction targets 20 um beyond the accepted 100 um
 // distal clearance so FP32 pose storage cannot turn an exactly-on-threshold
 // geometric construction into a false safe-side grasp.
@@ -4265,9 +4270,11 @@ numi::matter::PerfusedActiveJejunumSpec couplingPerfusedTissueSpec() {
         couplingLayer(numi::matter::JejunalLayer::serosa,
             0.15, 980.0, 520.0, 0.0, 0.05, {0.0, 1.0, 0.0}),
     }};
-    spec.longitudinalCells = 6u;
-    spec.circumferentialCells = 6u;
-    spec.throughThicknessCells = 4u;
+    // Direct strand contact requires the qualified operative-field spacing;
+    // the compact 6x6 contract mesh cannot resolve the 0.20 mm contact band.
+    spec.longitudinalCells = 34u;
+    spec.circumferentialCells = 40u;
+    spec.throughThicknessCells = 8u;
     return spec;
 }
 
@@ -4298,6 +4305,8 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
 
     require(!perfusedLayers || !punctureTip,
         "perfused layered coupling does not yet own topology mutation");
+    const std::uint32_t sutureContactEdgeBegin =
+        perfusedLayers ? kPerfusedSutureContactEdgeBegin : 0u;
     // Retain the source-sized 30 x 24 x 0.77 mm porcine coupon and 16 mm
     // enterotomy. The contact-only swage regression uses the smallest
     // qualified 6x6x1 transaction mesh. A puncture uses the production
@@ -4372,6 +4381,11 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
         ground.flags = NM_FIELD_DIRICHLET_ELECTRIC_POTENTIAL;
         ground.stableIdentifier = 1u;
         coupon.object.fieldBoundaries.push_back(ground);
+        // This qualification fixture is a flat, mutation-disabled coupon.
+        // Disable only same-object surface collision so sub-element surface
+        // spacing cannot manufacture dormant barriers; needle and live DER
+        // proxies remain fully coupled through external contact.
+        coupon.object.selfContact = false;
     } else {
         require(
             numi::matter::configurePorcineJejunumFungMaterial(
@@ -4583,7 +4597,28 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
     const double needleRadiusM = punctureTip
         ? tip.radiusM
         : needleAsset.spec.crossSectionRadiusM.value;
-    const Vec3 contactCenter = (endpointA + endpointB) * 0.5;
+    const bool strandContactPlacement =
+        perfusedLayers && !punctureTip &&
+        sutureContactSegmentCount != 0u;
+    require(
+        !strandContactPlacement ||
+            world.rods[0].defaultState.positions.size() >
+                sutureContactEdgeBegin + 1u,
+        "perfused strand coupling has no post-swage DER edge"
+    );
+    const Vec3 primaryEndpointA = strandContactPlacement
+        ? vector(world.rods[0].defaultState.positions[
+            sutureContactEdgeBegin])
+        : endpointA;
+    const Vec3 primaryEndpointB = strandContactPlacement
+        ? vector(world.rods[0].defaultState.positions[
+            sutureContactEdgeBegin + 1u])
+        : endpointB;
+    const double primaryRadiusM = strandContactPlacement
+        ? world.rods[0].model.radius
+        : needleRadiusM;
+    const Vec3 contactCenter =
+        (primaryEndpointA + primaryEndpointB) * 0.5;
     require(
         std::isfinite(initialSurfaceOffsetM) &&
             initialSurfaceOffsetM > 0.0,
@@ -4618,7 +4653,7 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
         "tissue coupling has no top-surface contact anchor"
     );
     const Vec3 authoredAnchor = vector(coupon.object.femNodes[anchorNode]);
-    const Vec3 capsuleEdge = endpointB - endpointA;
+    const Vec3 capsuleEdge = primaryEndpointB - primaryEndpointA;
     const double capsuleLength = norm(capsuleEdge);
     require(capsuleLength > 0.0, "tissue coupling capsule is degenerate");
     const Vec3 capsuleAxis = capsuleEdge * (1.0 / capsuleLength);
@@ -4645,7 +4680,7 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
             "puncture coupon frame is degenerate"
         );
         basisY = basisY * (1.0 / basisYLength);
-        targetContactPoint = endpointA + tip.approachDirection *
+        targetContactPoint = primaryEndpointA + tip.approachDirection *
             (needleRadiusM + initialSurfaceOffsetM);
         for (auto& position : coupon.object.femNodes) {
             const Vec3 relative = vector(position) - authoredAnchor;
@@ -4676,14 +4711,45 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
         contactDirection =
             contactDirection * (1.0 / contactDirectionLength);
         // A static preload begins just inside the 100 um IPC activation band.
-        // The barrier separates the live needle and free tissue surface.
+        // The perfused direct-contact mode places the surface under a proximal
+        // post-swage DER edge, away from the larger needle; the legacy mode
+        // retains its swage-side needle placement.
         targetContactPoint = contactCenter + contactDirection *
-            (needleRadiusM + initialSurfaceOffsetM);
-        const Vec3 translation = targetContactPoint - authoredAnchor;
-        for (auto& position : coupon.object.femNodes) {
-            position[0] += translation.x;
-            position[1] += translation.y;
-            position[2] += translation.z;
+            (primaryRadiusM + initialSurfaceOffsetM);
+        if (strandContactPlacement) {
+            const Vec3 basisX = capsuleAxis;
+            const Vec3 basisZ = contactDirection * -1.0;
+            Vec3 basisY = cross(basisZ, basisX);
+            const double basisYLength = norm(basisY);
+            require(
+                basisYLength > 1.0e-6,
+                "suture contact coupon frame is degenerate"
+            );
+            basisY = basisY * (1.0 / basisYLength);
+            for (auto& position : coupon.object.femNodes) {
+                const Vec3 relative = vector(position) - authoredAnchor;
+                const Vec3 transformed = targetContactPoint +
+                    basisX * relative.x +
+                    basisY * relative.y +
+                    basisZ * relative.z;
+                position = {transformed.x, transformed.y, transformed.z};
+            }
+            coupon.metadata.longitudinalAxis = {
+                basisX.x, basisX.y, basisX.z,
+            };
+            coupon.metadata.circumferentialAxis = {
+                basisY.x, basisY.y, basisY.z,
+            };
+            coupon.metadata.thicknessAxis = {
+                basisZ.x, basisZ.y, basisZ.z,
+            };
+        } else {
+            const Vec3 translation = targetContactPoint - authoredAnchor;
+            for (auto& position : coupon.object.femNodes) {
+                position[0] += translation.x;
+                position[1] += translation.y;
+                position[2] += translation.z;
+            }
         }
     }
     const std::size_t authoredContactNodeCount =
@@ -4728,9 +4794,9 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
             minimumAuthoredSeparation,
             pointSegmentDistance(
                 vector(coupon.object.femNodes[node]),
-                endpointA,
-                endpointB
-            ) - needleRadiusM
+                primaryEndpointA,
+                primaryEndpointB
+            ) - primaryRadiusM
         );
     }
     if (punctureTip) {
@@ -4754,7 +4820,9 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
     }
     std::cout << std::setprecision(9)
         << "tissue_contact_region="
-        << (punctureTip ? "tapered_tip" : "swage")
+        << (punctureTip
+            ? "tapered_tip"
+            : (strandContactPlacement ? "suture_strand" : "swage"))
         << " tissue_authored_minimum_separation_m="
         << minimumAuthoredSeparation
         << " tissue_surface_offset_m=" << initialSurfaceOffsetM
@@ -4763,9 +4831,9 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
         << coupon.object.femContactNodes.size() << '/'
         << authoredContactNodeCount
         << " tissue_authored_capsule_first="
-        << vectorSummary(endpointA)
+        << vectorSummary(primaryEndpointA)
         << " tissue_authored_capsule_second="
-        << vectorSummary(endpointB) << '\n';
+        << vectorSummary(primaryEndpointB) << '\n';
     if (sutureContactSegmentCount != 0u) {
         Vec3 thicknessAxis = vector(coupon.metadata.thicknessAxis);
         thicknessAxis = thicknessAxis * (1.0 / norm(thicknessAxis));
@@ -4816,16 +4884,17 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
     source.maximumDepenetrationSpeed = 0.05;
     source.deterministic = true;
     // The passive contact coupon reaches the identical accepted state by the
-    // fifth encoded Newton pass. The coupled four-layer field system retains
-    // the already-qualified perfused-tissue work budget; acceptance tolerances
-    // remain identical across both paths.
+    // fifth encoded Newton pass. The coupled four-layer/contact system doubles
+    // the standalone perfused linear work ceiling because its live DER rows
+    // enlarge the same monolithic KKT system; acceptance tolerances remain
+    // identical across both paths.
     source.mixedSolver.newtonIterations = perfusedLayers ? 12u : 5u;
     source.mixedSolver.fgmresRestart = perfusedLayers ? 16u : 10u;
     // The contact-refined operative entry uses the full ten-column Arnoldi
     // cycle while closing its accepted nonlinear residual by over two orders
     // of magnitude. Do not encode empty restart cycles into every 62.5 us
     // surgical microstep; the live residual and certificate remain authority.
-    source.mixedSolver.fgmresIterations = perfusedLayers ? 64u : 10u;
+    source.mixedSolver.fgmresIterations = perfusedLayers ? 128u : 10u;
     source.mixedSolver.lineSearchSteps = 12u;
     source.mixedSolver.relativeResidual = 5.0e-4;
     source.mixedSolver.volumeTolerance = 5.0e-4;
@@ -4839,7 +4908,7 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
         require(
             world.rods[0].collision.materialIndex <
                 world.model.materials.size() &&
-                sutureContactSegmentCount + 1u <=
+                sutureContactEdgeBegin + sutureContactSegmentCount + 1u <=
                     world.rods[0].model.restPositions.size(),
             "suture-to-tissue contact exceeds the live DER topology"
         );
@@ -4996,13 +5065,15 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
     for (std::uint32_t edge = 0u;
          edge < sutureContactSegmentCount;
          ++edge) {
+        const std::uint32_t strandEdge =
+            sutureContactEdgeBegin + edge;
         numi::matter::RigidProxySource proxy;
         proxy.shape = NM_RIGID_CAPSULE;
         proxy.materialIndex = sutureInterfaceMaterial;
         proxy.radiusOrOffset = world.rods[0].model.radius;
         proxy.sutureStrand = true;
-        proxy.strandNodeA = edge;
-        proxy.strandNodeB = edge + 1u;
+        proxy.strandNodeA = strandEdge;
+        proxy.strandNodeB = strandEdge + 1u;
         source.rigidProxies.push_back(proxy);
     }
     source.objects.push_back(coupon.object);
@@ -5025,7 +5096,10 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
         numi::matter::validateCompiledWorldLayout(
             compiled.world,
             &layoutError
-        ) && compiled.world.dispatch.contactPairCount != 0u,
+        ) && compiled.world.dispatch.contactPairCount != 0u &&
+            !compiled.world.objects.empty() &&
+            (((compiled.world.objects[0].flags &
+               NM_OBJECT_SELF_CONTACT) != 0u) == !perfusedLayers),
         "needle-suture tissue layout is invalid: " + layoutError
     );
     const std::uint32_t unifiedAnchor =
@@ -5050,6 +5124,9 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
         << " suture_contact_segments=" << sutureContactSegmentCount
         << " total_contact_proxies="
         << compiled.world.contact.rigidProxies.size()
+        << " self_contact="
+        << ((compiled.world.objects[0].flags &
+             NM_OBJECT_SELF_CONTACT) != 0u)
         << " proxy_flags="
         << compiled.world.contact.rigidProxies.at(0u).flags << '\n';
     return std::move(compiled.world);
@@ -6524,6 +6601,8 @@ int main(const int argc, const char* const argv[]) {
         const bool tissueSutureContactOnly =
             tissueSutureEntryContactOnly || tissueSuturePassageOnly ||
             tissueCurvedPullThroughOnly;
+        const bool tissueDirectSutureContact =
+            tissueSutureContactOnly || perfusedTissueCouplingOnly;
         const bool receiverFrameIkOnly =
             options.mode == "--receiver-frame-ik-only";
         const bool receiverExtractionGeometryOnly =
@@ -11347,13 +11426,17 @@ int main(const int argc, const char* const argv[]) {
                 needleForPlacement,
                 tissuePunctureOnly
                     ? kPunctureInitialClearanceM
-                    : (tissueRestOnly ? 1.5e-4 : 5.0e-5),
+                    : (tissueRestOnly
+                        ? 1.5e-4
+                        : (perfusedTissueCouplingOnly
+                            ? kPerfusedDirectContactInitialClearanceM
+                            : 5.0e-5)),
                 tissuePunctureOnly,
                 perfusedTissueCouplingOnly,
                 (tissueCurvedPassageOnly || tissueSutureEntryContactOnly)
                     ? kCurvedPassageContactSegmentCount
                     : 1u,
-                tissueSutureContactOnly
+                tissueDirectSutureContact
                     ? kSutureMatterContactSegmentCount : 0u,
                 tissueCoupon
             );
@@ -11422,12 +11505,12 @@ int main(const int argc, const char* const argv[]) {
             // the separate surgical-sequence replay.
             stepConfig.timestepSeconds = static_cast<float>(
                 (kControlTimestep / static_cast<double>(kPhysicsSubsteps)) *
-                (tissueSutureContactOnly
+                (tissueDirectSutureContact
                      ? static_cast<double>(
                          kSutureEntryMatterRateMultiplier
                      ) : 1.0)
             );
-            stepConfig.physicsSubsteps = tissueSutureContactOnly
+            stepConfig.physicsSubsteps = tissueDirectSutureContact
                 ? kSutureEntryMatterRateMultiplier : 1u;
             stepConfig.devicePhysicsProgram =
                 numi::matter::makeMetalWorldDevicePhysicsProgram(
@@ -11435,7 +11518,7 @@ int main(const int argc, const char* const argv[]) {
                 );
                 require(
                     stepConfig.devicePhysicsProgram.valid() &&
-                    (!tissueSutureContactOnly ||
+                    (!tissueDirectSutureContact ||
                      (stepConfig.devicePhysicsProgram.flags &
                       metalrobo::
                           MetalWorldDevicePhysicsCouplesRodNodes) != 0u) &&
@@ -13695,9 +13778,14 @@ int main(const int argc, const char* const argv[]) {
                         std::to_string(channelReleaseSignedNeedleMotionM)
                 );
             } else {
+                const bool acceptedContactPath =
+                    perfusedTissueCouplingOnly
+                    ? activeSutureStrandContacts >= 1u &&
+                        sutureStrandNormalImpulse > 1.0e-9
+                    : reaction.impulseAndCount.w >= 1.0f &&
+                        norm(reactionImpulse) > 1.0e-9;
                 require(
-                    reaction.impulseAndCount.w >= 1.0f &&
-                        norm(reactionImpulse) > 1.0e-9 &&
+                    acceptedContactPath &&
                         needleVelocityDelta > 1.0e-9 &&
                         threadRootVelocityDelta > 1.0e-9 &&
                         maximumTissueDisplacement > 0.0 &&
@@ -13710,6 +13798,10 @@ int main(const int argc, const char* const argv[]) {
                         std::to_string(reaction.impulseAndCount.w) +
                         " active_contacts=" +
                         std::to_string(activeContacts) +
+                        " suture_strand_contacts=" +
+                        std::to_string(activeSutureStrandContacts) +
+                        " suture_strand_impulse=" +
+                        std::to_string(sutureStrandNormalImpulse) +
                         " reaction_impulse=" +
                         vectorSummary(reactionImpulse) +
                         " needle_velocity_delta=" +
@@ -13741,6 +13833,10 @@ int main(const int argc, const char* const argv[]) {
                 << reaction.impulseAndCount.w
                 << " final_active_contacts=" << activeContacts
                 << " final_normal_impulse_ns=" << normalImpulse
+                << " suture_strand_contacts="
+                << activeSutureStrandContacts
+                << " suture_strand_impulse_ns="
+                << sutureStrandNormalImpulse
                 << " reaction_impulse_ns="
                 << vectorSummary(reactionImpulse)
                 << " needle_velocity_delta_mps="

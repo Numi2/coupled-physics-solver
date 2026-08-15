@@ -1078,7 +1078,8 @@ CompileResult compileWorld(
             (representation == Representation::fem && object.multiphysics.enabled
                 ? NM_OBJECT_MULTIPHYSICS : 0u) |
             (representation == Representation::fem && object.mutationPolicy.enabled
-                ? NM_OBJECT_MUTABLE_TOPOLOGY : 0u);
+                ? NM_OBJECT_MUTABLE_TOPOLOGY : 0u) |
+            (object.selfContact ? NM_OBJECT_SELF_CONTACT : 0u);
         descriptor.schedulerIndex = objectIndex;
         descriptor.rigidBinding = object.rigidBinding;
         descriptor.topologyGeneration = 1u;

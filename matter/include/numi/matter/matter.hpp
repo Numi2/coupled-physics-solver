@@ -393,6 +393,10 @@ struct ObjectSource {
     bool twoWayCoupling = true;
     bool adaptive = false;
     bool identifiable = false;
+    // Same-object surface collision is explicit physics ownership. Keep it on
+    // by default; flat fixtures may disable it while external rigid/strand
+    // contact remains fully active.
+    bool selfContact = true;
     std::uint32_t rigidBinding = NM_INVALID_INDEX;
     double characteristicLength = 0.01;
     // MPM uses a fixed-capacity Eulerian background grid. These bounds are
