@@ -7,6 +7,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 #ifndef NUMI_JEJUNUM_MATERIAL
 #define NUMI_JEJUNUM_MATERIAL ""
@@ -103,24 +104,70 @@ int main() {
             error
         );
 
-        const auto parsed = numi::matter::parseMatterFile(NUMI_JEJUNUM_MATERIAL);
-        require(parsed.succeeded(), "failed to parse porcine jejunum base material");
-        auto material = parsed.material;
-        require(
-            numi::matter::configurePerfusedActiveJejunumLayerMaterial(
-                material,
-                spec.layers[1],
-                &error
-            ),
-            error
-        );
-        require(
-            material.name == "porcine_jejunum_perfused_circular-muscle" &&
-                material.mixed.maximumActiveTension > 0.0 &&
+        numi::matter::WorldSource source;
+        for (const auto& layerSpec : spec.layers) {
+            const auto parsed =
+                numi::matter::parseMatterFile(NUMI_JEJUNUM_MATERIAL);
+            require(parsed.succeeded(),
+                "failed to parse porcine jejunum base material");
+            auto material = parsed.material;
+            require(
+                numi::matter::configurePerfusedActiveJejunumLayerMaterial(
+                    material,
+                    layerSpec,
+                    &error
+                ),
+                error
+            );
+            require(
                 material.mixed.poreMobility > 0.0 &&
-                material.mixed.electricalConductivity > 0.0,
-            "identified layer did not publish coupled multiphysics"
+                    material.mixed.electricalConductivity > 0.0,
+                "identified layer did not publish coupled multiphysics"
+            );
+            source.materials.push_back(std::move(material));
+        }
+        const auto coupon =
+            numi::matter::makePerfusedActiveJejunumClosureCoupon(
+                {0u, 1u, 2u, 3u}, spec
+            );
+        require(
+            coupon.object.multiphysics.enabled &&
+                !coupon.object.mutationPolicy.enabled &&
+                coupon.object.materialIndex == 3u &&
+                std::ranges::all_of(
+                    coupon.tetrahedronCounts,
+                    [](const std::uint32_t count) { return count > 0u; }
+                ),
+            "four-layer coupon did not retain its safe ownership boundary"
         );
+        source.environmentCount = 1u;
+        source.frameTimestep = 1.0 / 2000.0;
+        source.gravity = {0.0, 0.0, 0.0};
+        auto routedObject = coupon.object;
+        numi::matter::FieldBoundarySource ground;
+        ground.node = 0u;
+        ground.flags = NM_FIELD_DIRICHLET_ELECTRIC_POTENTIAL;
+        ground.stableIdentifier = 1u;
+        routedObject.fieldBoundaries.push_back(ground);
+        source.objects.push_back(std::move(routedObject));
+        numi::matter::CompileOptions options;
+        options.maximumRateExponent = 6u;
+        const auto compiled = numi::matter::compileWorld(source, options);
+        std::string compileError;
+        for (const auto& diagnostic : compiled.diagnostics) {
+            if (!compileError.empty()) compileError += "; ";
+            compileError += diagnostic.message;
+        }
+        require(compiled.succeeded(), compileError);
+        std::array<std::uint32_t, 4> cookedCounts{};
+        for (const NMTetrahedronGPU& tetrahedron :
+             compiled.world.fem.tetrahedra) {
+            require(tetrahedron.identity.x < cookedCounts.size(),
+                "layered coupon cooked an invalid material owner");
+            ++cookedCounts[tetrahedron.identity.x];
+        }
+        require(cookedCounts == coupon.tetrahedronCounts,
+            "layered coupon changed material ownership during compilation");
 
         auto duplicate = spec;
         duplicate.layers[3].layer = numi::matter::JejunalLayer::circularMuscle;
@@ -130,7 +177,9 @@ int main() {
         );
 
         std::cout << "perfused-active tissue contract passed: layers="
-                  << spec.layers.size() << '\n';
+                  << spec.layers.size()
+                  << " tetrahedra=" << coupon.metadata.tetrahedronCount
+                  << " mutation=disabled\n";
         return 0;
     } catch (const std::exception& exception) {
         std::cerr << "perfused-active tissue contract failed: "

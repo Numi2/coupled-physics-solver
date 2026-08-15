@@ -511,9 +511,16 @@ PorcineJejunumFungResponse evaluatePorcineJejunumFungResponse(
     return result;
 }
 
-PorcineJejunumClosureCoupon makePorcineJejunumClosureCoupon(
+namespace {
+
+PorcineJejunumClosureCoupon makeJejunumClosureCoupon(
     const std::uint32_t materialIndex,
-    const PorcineJejunumFungSpec& spec
+    const PorcineJejunumFungSpec& spec,
+    const std::vector<double>& zCoordinates,
+    const std::vector<std::uint32_t>& slabMaterials,
+    const bool mutableTopology,
+    const std::string_view objectName,
+    const std::string_view fidelityBoundary
 ) {
     if (!finitePositive(spec.lengthM) ||
         !finitePositive(spec.widthM) ||
@@ -531,7 +538,11 @@ PorcineJejunumClosureCoupon makePorcineJejunumClosureCoupon(
         spec.throughThicknessCells < 1u ||
         spec.longitudinalCells > 256u ||
         spec.circumferentialCells > 256u ||
-        spec.throughThicknessCells > 16u) {
+        spec.throughThicknessCells > 64u ||
+        (!zCoordinates.empty() &&
+         zCoordinates.size() != spec.throughThicknessCells + 1u) ||
+        (!slabMaterials.empty() &&
+         slabMaterials.size() != spec.throughThicknessCells)) {
         throw std::invalid_argument(
             "porcine jejunum closure-coupon specification is invalid"
         );
@@ -543,7 +554,23 @@ PorcineJejunumClosureCoupon makePorcineJejunumClosureCoupon(
     const std::uint32_t seamY = ny / 2u;
     const double dx = spec.lengthM.value / static_cast<double>(nx);
     const double dy = spec.widthM.value / static_cast<double>(ny);
-    const double dz = spec.thicknessM.value / static_cast<double>(nz);
+    const double uniformDz =
+        spec.thicknessM.value / static_cast<double>(nz);
+    const auto zPosition = [&](const std::uint32_t iz) {
+        return zCoordinates.empty()
+            ? -0.5 * spec.thicknessM.value + uniformDz * iz
+            : zCoordinates[iz];
+    };
+    double minimumDz = std::numeric_limits<double>::infinity();
+    for (std::uint32_t iz = 0u; iz < nz; ++iz) {
+        const double interval = zPosition(iz + 1u) - zPosition(iz);
+        if (!(interval > kMinimumDimension) || !std::isfinite(interval)) {
+            throw std::invalid_argument(
+                "jejunal through-thickness coordinates are not strictly increasing"
+            );
+        }
+        minimumDz = std::min(minimumDz, interval);
+    }
     const std::uint32_t incisionCellCount = std::clamp(
         static_cast<std::uint32_t>(std::llround(
             spec.incisionLengthM.value / dx
@@ -578,14 +605,14 @@ PorcineJejunumClosureCoupon makePorcineJejunumClosureCoupon(
     PorcineJejunumClosureCoupon result;
     result.spec = spec;
     ObjectSource& object = result.object;
-    object.name = "porcine_jejunum_enterotomy_coupon";
+    object.name = std::string(objectName);
     object.materialIndex = materialIndex;
     object.representation = Representation::fem;
     object.twoWayCoupling = true;
-    object.characteristicLength = std::min({dx, dy, dz});
+    object.characteristicLength = std::min({dx, dy, minimumDz});
     object.mixedFEM = true;
-    object.mutationPolicy.enabled = true;
-    object.mutationPolicy.cohesiveFracture = true;
+    object.mutationPolicy.enabled = mutableTopology;
+    object.mutationPolicy.cohesiveFracture = mutableTopology;
     // Automatic puncture remains disabled until needle/tissue impulse has a
     // specimen-specific calibration; explicit puncture commands are reserved.
     object.mutationPolicy.punctureImpulseThreshold = 0.0;
@@ -614,7 +641,7 @@ PorcineJejunumClosureCoupon makePorcineJejunumClosureCoupon(
                 std::array<double, 3> position{
                     longitudinalPosition(ix),
                     -0.5 * spec.widthM.value + dy * iy,
-                    -0.5 * spec.thicknessM.value + dz * iz,
+                    zPosition(iz),
                 };
                 const bool lowerIncisionLip =
                     iy == seamY &&
@@ -700,6 +727,8 @@ PorcineJejunumClosureCoupon makePorcineJejunumClosureCoupon(
                         corners[local[2]],
                         corners[local[3]],
                     }};
+                    tetrahedron.materialIndex = slabMaterials.empty()
+                        ? materialIndex : slabMaterials[iz];
                     const double volume = tetrahedronVolume(
                         object.femNodes[tetrahedron.nodes[0]],
                         object.femNodes[tetrahedron.nodes[1]],
@@ -782,24 +811,184 @@ PorcineJejunumClosureCoupon makePorcineJejunumClosureCoupon(
         static_cast<std::uint32_t>(object.femNodes.size());
     const std::uint32_t tetrahedronCount =
         static_cast<std::uint32_t>(object.tetrahedra.size());
-    object.femCapacity.nodes = nodeCount + 64u;
-    object.femCapacity.tetrahedra = tetrahedronCount + 128u;
-    // A conforming tetrahedral volume has fewer than 2*T internal faces.
-    // Reserve that topology-derived bound rather than a blanket factor.
-    object.femCapacity.cohesiveFaces = 2u * tetrahedronCount;
-    object.femCapacity.punctureChannels = 64u;
-    object.femCapacity.mutationCommands = 64u;
+    if (mutableTopology) {
+        object.femCapacity.nodes = nodeCount + 64u;
+        object.femCapacity.tetrahedra = tetrahedronCount + 128u;
+        // A conforming tetrahedral volume has fewer than 2*T internal faces.
+        // Reserve that topology-derived bound rather than a blanket factor.
+        object.femCapacity.cohesiveFaces = 2u * tetrahedronCount;
+        object.femCapacity.punctureChannels = 64u;
+        object.femCapacity.mutationCommands = 64u;
+    }
 
     result.metadata.nodeCount = nodeCount;
     result.metadata.tetrahedronCount = tetrahedronCount;
     result.metadata.fixedNodeCount =
         static_cast<std::uint32_t>(object.femFixedNodes.size());
     result.metadata.minimumRestTetrahedronVolumeM3 = minimumVolume;
-    result.metadata.fidelityBoundary =
+    result.metadata.fidelityBoundary = std::string(fidelityBoundary);
+    return result;
+}
+
+} // namespace
+
+PorcineJejunumClosureCoupon makePorcineJejunumClosureCoupon(
+    const std::uint32_t materialIndex,
+    const PorcineJejunumFungSpec& spec
+) {
+    return makeJejunumClosureCoupon(
+        materialIndex,
+        spec,
+        {},
+        {},
+        true,
+        "porcine_jejunum_enterotomy_coupon",
         "Source-parameterized porcine jejunal planar hyperelasticity; "
         "research 3-D regularization, density, incision and fixture; no "
         "patient, perfusion, layered histology, failure or puncture "
-        "calibration.";
+        "calibration."
+    );
+}
+
+PerfusedActiveJejunumClosureCoupon
+makePerfusedActiveJejunumClosureCoupon(
+    const std::array<std::uint32_t, 4>& materialIndices,
+    const PerfusedActiveJejunumSpec& spec
+) {
+    std::string validationError;
+    if (!validatePerfusedActiveJejunumSpec(spec, &validationError)) {
+        throw std::invalid_argument(validationError);
+    }
+    auto sortedMaterialIndices = materialIndices;
+    std::ranges::sort(sortedMaterialIndices);
+    if (std::ranges::any_of(materialIndices, [](const std::uint32_t index) {
+            return index == NM_INVALID_INDEX;
+        }) || std::ranges::adjacent_find(sortedMaterialIndices) !=
+            sortedMaterialIndices.end()) {
+        throw std::invalid_argument(
+            "perfused-active jejunum requires four distinct material indices"
+        );
+    }
+
+    std::array<const PerfusedJejunalLayerSpec*, 4> canonicalLayers{};
+    for (const auto& layer : spec.layers) {
+        canonicalLayers[static_cast<std::size_t>(layer.layer)] = &layer;
+    }
+    const std::uint32_t nz = spec.throughThicknessCells;
+    std::array<std::uint32_t, 4> cells{};
+    std::array<double, 4> target{};
+    std::uint32_t assigned = 0u;
+    for (std::size_t layer = 0u; layer < cells.size(); ++layer) {
+        target[layer] = canonicalLayers[layer]->thicknessFraction.value * nz;
+        cells[layer] = std::max(
+            1u, static_cast<std::uint32_t>(std::floor(target[layer]))
+        );
+        assigned += cells[layer];
+    }
+    while (assigned > nz) {
+        std::size_t selected = cells.size();
+        double greatestExcess = -std::numeric_limits<double>::infinity();
+        for (std::size_t layer = 0u; layer < cells.size(); ++layer) {
+            const double excess = cells[layer] - target[layer];
+            if (cells[layer] > 1u && excess > greatestExcess) {
+                greatestExcess = excess;
+                selected = layer;
+            }
+        }
+        if (selected == cells.size()) {
+            throw std::logic_error(
+                "four-layer jejunum cell allocation cannot satisfy its mesh budget"
+            );
+        }
+        --cells[selected];
+        --assigned;
+    }
+    while (assigned < nz) {
+        std::size_t selected = 0u;
+        double greatestDeficit = -std::numeric_limits<double>::infinity();
+        for (std::size_t layer = 0u; layer < cells.size(); ++layer) {
+            const double deficit = target[layer] - cells[layer];
+            if (deficit > greatestDeficit) {
+                greatestDeficit = deficit;
+                selected = layer;
+            }
+        }
+        ++cells[selected];
+        ++assigned;
+    }
+
+    std::vector<double> zCoordinates;
+    std::vector<std::uint32_t> slabMaterials;
+    zCoordinates.reserve(static_cast<std::size_t>(nz) + 1u);
+    slabMaterials.reserve(nz);
+    double z = -0.5 * spec.thicknessM.value;
+    zCoordinates.push_back(z);
+    for (std::size_t layer = 0u; layer < cells.size(); ++layer) {
+        const double layerThickness = spec.thicknessM.value *
+            canonicalLayers[layer]->thicknessFraction.value;
+        const double dz = layerThickness / cells[layer];
+        for (std::uint32_t cell = 0u; cell < cells[layer]; ++cell) {
+            z += dz;
+            zCoordinates.push_back(z);
+            slabMaterials.push_back(materialIndices[layer]);
+        }
+    }
+    zCoordinates.back() = 0.5 * spec.thicknessM.value;
+
+    PorcineJejunumFungSpec geometry;
+    geometry.lengthM = {spec.lengthM.value, JejunalValueBasis::derivedGeometry};
+    geometry.widthM = {spec.widthM.value, JejunalValueBasis::derivedGeometry};
+    geometry.thicknessM = {
+        spec.thicknessM.value, JejunalValueBasis::derivedGeometry
+    };
+    geometry.incisionLengthM = {
+        spec.incisionLengthM.value, JejunalValueBasis::derivedGeometry
+    };
+    geometry.incisionGapM = {
+        spec.incisionGapM.value, JejunalValueBasis::derivedGeometry
+    };
+    geometry.densityKgPerM3 = {
+        canonicalLayers[0]->densityKgPerM3.value,
+        JejunalValueBasis::derivedGeometry
+    };
+    geometry.longitudinalCells = spec.longitudinalCells;
+    geometry.circumferentialCells = spec.circumferentialCells;
+    geometry.throughThicknessCells = spec.throughThicknessCells;
+    geometry.fixLongitudinalEnds = false;
+
+    const std::uint32_t serosa = static_cast<std::uint32_t>(
+        JejunalLayer::serosa
+    );
+    auto built = makeJejunumClosureCoupon(
+        materialIndices[serosa],
+        geometry,
+        zCoordinates,
+        slabMaterials,
+        false,
+        "perfused_active_jejunal_enterotomy_coupon",
+        "Evidence-owned four-layer jejunal geometry, element materials, "
+        "mixed transport and activation; object-level serosa contact; no "
+        "heterogeneous puncture, cohesive mutation, or measured validation."
+    );
+    built.object.multiphysics.enabled = true;
+    built.object.multiphysics.initialTemperature =
+        spec.perfusionTemperatureK.value;
+    built.object.multiphysics.initialMechanicalPressure = 0.0;
+    built.object.multiphysics.initialPorePressure =
+        spec.initialPorePressurePa.value;
+    built.object.multiphysics.initialElectricPotential = 0.0;
+    built.object.multiphysics.initialActivation = 0.0;
+
+    PerfusedActiveJejunumClosureCoupon result;
+    result.object = std::move(built.object);
+    result.spec = spec;
+    result.metadata = std::move(built.metadata);
+    result.materialIndices = materialIndices;
+    const std::uint32_t tetrahedraPerSlab =
+        6u * spec.longitudinalCells * spec.circumferentialCells;
+    for (std::size_t layer = 0u; layer < cells.size(); ++layer) {
+        result.tetrahedronCounts[layer] = cells[layer] * tetrahedraPerSlab;
+    }
     return result;
 }
 

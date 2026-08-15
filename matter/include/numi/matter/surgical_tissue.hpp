@@ -196,6 +196,17 @@ struct PerfusedActiveJejunumSpec {
     std::uint32_t throughThicknessCells = 0u;
 };
 
+struct PerfusedActiveJejunumClosureCoupon {
+    ObjectSource object;
+    PerfusedActiveJejunumSpec spec;
+    PorcineJejunumClosureMetadata metadata;
+    // Canonical JejunalLayer order. Each tetrahedron owns one of these
+    // material indices; the serosa entry is the current object-level contact
+    // interface until surface-material routing is promoted.
+    std::array<std::uint32_t, 4> materialIndices{};
+    std::array<std::uint32_t, 4> tetrahedronCounts{};
+};
+
 [[nodiscard]] std::string_view identifiedJejunalBasisName(
     IdentifiedJejunalBasis basis
 ) noexcept;
@@ -219,6 +230,16 @@ struct PerfusedActiveJejunumSpec {
     MaterialProgram& material,
     const PerfusedJejunalLayerSpec& layer,
     std::string* error = nullptr
+);
+
+// Builds a four-layer, nonuniform through-thickness closure coupon and routes
+// every tetrahedron to its canonical identified material. Mixed fields are
+// initialized from the perfusion contract. Heterogeneous topology mutation is
+// deliberately disabled until its transactions preserve material identity.
+[[nodiscard]] PerfusedActiveJejunumClosureCoupon
+makePerfusedActiveJejunumClosureCoupon(
+    const std::array<std::uint32_t, 4>& materialIndices,
+    const PerfusedActiveJejunumSpec& spec
 );
 
 // Applies the source coefficients and explicit 3-D regularization settings to
