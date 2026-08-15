@@ -720,7 +720,7 @@ kernel void nm_fem_internal_forces(
         valid = valid && found;
     }
     if ((object.flags & NM_OBJECT_MIXED_FEM) != 0u &&
-        object.materialIndex < dispatch.mixedMaterialCount) {
+        tetrahedron.identity.x < dispatch.mixedMaterialCount) {
         float4 fieldAverage = float4(0.0f);
         float activation = 0.0f;
         for (uint slot = 0u; slot < 4u; ++slot) {
@@ -732,7 +732,7 @@ kernel void nm_fem_internal_forces(
         fieldAverage *= 0.25f;
         activation *= 0.25f;
         stress = mixedFirstPiola(
-            stress, deformation, mixedMaterials[object.materialIndex],
+            stress, deformation, mixedMaterials[tetrahedron.identity.x],
             fieldAverage.x, fieldAverage.z, activation
         );
     }
@@ -831,8 +831,9 @@ kernel void nm_fem_build_mechanical_residual(
     if ((object.flags & NM_OBJECT_MIXED_FEM) != 0u &&
         object.materialIndex < dispatch.mixedMaterialCount) {
         pressureDiagonal = 0.0f;
-        const NMMixedMaterialGPU mixed = mixedMaterials[object.materialIndex];
-        const float bulk = max(mixed.mechanics.x, 1.0e-12f);
+        const float bulk = max(
+            mixedMaterials[object.materialIndex].mechanics.x, 1.0e-12f
+        );
         const float nodalQ = fields[global].primary.x / bulk;
         uint active = 0u;
         for (uint local = 0u; local < range.count; ++local) {
@@ -842,6 +843,7 @@ kernel void nm_fem_build_mechanical_residual(
                 dispatch, tetrahedra, environment, tetIndex
             );
             if ((tet.identity.w & NM_OBJECT_ACTIVE) == 0u) continue;
+            const NMMixedMaterialGPU mixed = mixedMaterials[tet.identity.x];
             const float determinantValue = determinant(
                 tetrahedronDeformation(tet, candidate,
                     environment * dispatch.femNodeCount)
@@ -999,8 +1001,9 @@ kernel void nm_fem_apply_operator_elements(
         valid = valid && found;
     }
     if ((object.flags & NM_OBJECT_MIXED_FEM) != 0u &&
-        object.materialIndex < dispatch.mixedMaterialCount) {
-        const NMMixedMaterialGPU mixed = mixedMaterials[object.materialIndex];
+        tetrahedron.identity.x < dispatch.mixedMaterialCount) {
+        const NMMixedMaterialGPU mixed =
+            mixedMaterials[tetrahedron.identity.x];
         float4 fieldAverage = float4(0.0f);
         float activation = 0.0f;
         float averagePressureDirection = 0.0f;
@@ -1063,7 +1066,7 @@ kernel void nm_fem_apply_operator_elements(
     }
     NMFEMElementVectorGPU value = tetrahedronForce(tetrahedron, tangent);
     if ((object.flags & NM_OBJECT_MIXED_FEM) != 0u &&
-        object.materialIndex < dispatch.mixedMaterialCount) {
+        tetrahedron.identity.x < dispatch.mixedMaterialCount) {
         float averagePressureDirection = 0.0f;
         for (uint slot = 0u; slot < 4u; ++slot)
             averagePressureDirection +=
@@ -1086,7 +1089,7 @@ kernel void nm_fem_apply_operator_elements(
                     fieldBase + nodeBase + tetrahedron.nodes[slot]].x;
         averageTemperatureDirection *= 0.25f;
         const float thermalConstraint = -3.0f *
-            mixedMaterials[object.materialIndex].mechanics.y *
+            mixedMaterials[tetrahedron.identity.x].mechanics.y *
             averageTemperatureDirection;
         value.node0.w = volumeDirection + averagePressureDirection +
             thermalConstraint +
@@ -1238,11 +1241,11 @@ kernel void nm_fem_select_backtracking(
                     dispatch.numericalLimits.z, material.validity.x
                 ) && determinantValue <= material.validity.y;
             if ((object.flags & NM_OBJECT_MIXED_FEM) != 0u &&
-                object.materialIndex < dispatch.mixedMaterialCount &&
+                tetrahedron.identity.x < dispatch.mixedMaterialCount &&
                 currentDeterminant > dispatch.numericalLimits.z &&
                 determinantValue > dispatch.numericalLimits.z) {
                 const NMMixedMaterialGPU mixed =
-                    mixedMaterials[object.materialIndex];
+                    mixedMaterials[tetrahedron.identity.x];
                 const float bulk = max(
                     mixed.mechanics.x, solver.regularization.x);
                 float currentPressure = 0.0f;
@@ -1628,9 +1631,9 @@ inline float4 fusedFEMOperatorAtNode(
             elementValid = elementValid && found;
         }
         if ((object.flags & NM_OBJECT_MIXED_FEM) != 0u &&
-            object.materialIndex < dispatch.mixedMaterialCount) {
+            tetrahedron.identity.x < dispatch.mixedMaterialCount) {
             const NMMixedMaterialGPU mixed =
-                mixedMaterials[object.materialIndex];
+                mixedMaterials[tetrahedron.identity.x];
             float4 fieldAverage = float4(0.0f);
             float activation = 0.0f;
             float averageQDirection = 0.0f;

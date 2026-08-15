@@ -1003,18 +1003,6 @@ CompileResult compileWorld(
                         tetrahedron.materialIndex != object.materialIndex;
                 }
             );
-        if (heterogeneousFEM &&
-            (object.mixedFEM || object.multiphysics.enabled ||
-             object.mutationPolicy.enabled)) {
-            result.diagnostics.push_back({
-                Diagnostic::Severity::error, 0u, 0u,
-                "heterogeneous FEM object '" + object.name +
-                    "' currently requires passive, non-mixed, immutable "
-                    "topology; mixed fields and topology mutation still own "
-                    "an object-level material route",
-            });
-            return result;
-        }
         std::uint32_t exponent = rateExponent(
             object, material, source, options
         );
@@ -1044,6 +1032,37 @@ CompileResult compileWorld(
                         options
                     )
                 );
+            }
+        }
+        if (heterogeneousFEM && object.mutationPolicy.enabled) {
+            result.diagnostics.push_back({
+                Diagnostic::Severity::error, 0u, 0u,
+                "heterogeneous FEM object '" + object.name +
+                    "' cannot enable topology mutation until material "
+                    "ownership is routed through every mutation transaction",
+            });
+            return result;
+        }
+        if (heterogeneousFEM &&
+            (object.mixedFEM || object.multiphysics.enabled)) {
+            const nm_float4 referenceMechanics =
+                world.mixedMaterials[object.materialIndex].mechanics;
+            for (const TetrahedronSource& tetrahedron : object.tetrahedra) {
+                const std::uint32_t tetrahedronMaterial =
+                    tetrahedron.materialIndex == NM_INVALID_INDEX
+                    ? object.materialIndex : tetrahedron.materialIndex;
+                const nm_float4 mechanics =
+                    world.mixedMaterials[tetrahedronMaterial].mechanics;
+                if (mechanics.x != referenceMechanics.x ||
+                    mechanics.y != referenceMechanics.y) {
+                    result.diagnostics.push_back({
+                        Diagnostic::Severity::error, 0u, 0u,
+                        "heterogeneous mixed FEM object '" + object.name +
+                            "' requires one shared bulk modulus and thermal "
+                            "expansion while pressure remains a nodal unknown",
+                    });
+                    return result;
+                }
             }
         }
 
@@ -1586,8 +1605,21 @@ CompileResult compileWorld(
                 );
                 world.fem.fieldBoundaries.push_back(cooked);
             }
-            if (object.multiphysics.enabled &&
-                material.mixed.electricalConductivity > 0.0) {
+            const auto tetrahedronMaterialIndex =
+                [&](const TetrahedronSource& tetrahedron) {
+                    return tetrahedron.materialIndex == NM_INVALID_INDEX
+                        ? object.materialIndex : tetrahedron.materialIndex;
+                };
+            const bool ownsConductiveTetrahedron =
+                object.multiphysics.enabled && std::ranges::any_of(
+                    object.tetrahedra,
+                    [&](const TetrahedronSource& tetrahedron) {
+                        return source.materials[
+                            tetrahedronMaterialIndex(tetrahedron)
+                        ].mixed.electricalConductivity > 0.0;
+                    }
+                );
+            if (ownsConductiveTetrahedron) {
                 std::vector<std::uint32_t> parent(object.femNodes.size());
                 std::iota(parent.begin(), parent.end(), 0u);
                 const auto root = [&](std::uint32_t node) {
@@ -1598,6 +1630,9 @@ CompileResult compileWorld(
                     return node;
                 };
                 for (const TetrahedronSource& tetrahedron : object.tetrahedra) {
+                    if (!(source.materials[
+                            tetrahedronMaterialIndex(tetrahedron)
+                        ].mixed.electricalConductivity > 0.0)) continue;
                     if (std::ranges::any_of(
                             tetrahedron.nodes,
                             [&](const std::uint32_t node) {
@@ -1611,7 +1646,10 @@ CompileResult compileWorld(
                 }
                 std::set<std::uint32_t> conductiveComponents;
                 for (const TetrahedronSource& tetrahedron : object.tetrahedra)
-                    if (tetrahedron.nodes[0] < object.femNodes.size())
+                    if (source.materials[
+                            tetrahedronMaterialIndex(tetrahedron)
+                        ].mixed.electricalConductivity > 0.0 &&
+                        tetrahedron.nodes[0] < object.femNodes.size())
                         conductiveComponents.insert(root(tetrahedron.nodes[0]));
                 std::set<std::uint32_t> groundedComponents;
                 for (const FieldBoundarySource& boundary : object.fieldBoundaries)

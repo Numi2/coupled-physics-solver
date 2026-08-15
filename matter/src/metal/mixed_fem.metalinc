@@ -291,7 +291,7 @@ kernel void nm_mixed_apply_operator_elements(
         tetrahedron.identity.y >= dispatch.objectCount) return;
     const NMContinuumObjectGPU object = objects[tetrahedron.identity.y];
     if ((object.flags & NM_OBJECT_MULTIPHYSICS) == 0u ||
-        object.materialIndex >= dispatch.mixedMaterialCount ||
+        tetrahedron.identity.x >= dispatch.mixedMaterialCount ||
         ((microstep.flags & NM_MICROSTEP_FGMRES_OPERATOR) != 0u &&
          fgmresStates[environment].diagnostics.z > 0.5f)) return;
     const uint nodeBase = environment * dispatch.femNodeCount;
@@ -301,7 +301,7 @@ kernel void nm_mixed_apply_operator_elements(
     electric *= 0.25f;
     float4 mass, diffusion, source;
     mixedTransportCoefficients(
-        materials[object.materialIndex], max(microstep.time.x, 1.0e-12f),
+        materials[tetrahedron.identity.x], max(microstep.time.x, 1.0e-12f),
         electric, mass, diffusion, source
     );
     const float volume = tetrahedron.inverseRestRow0.w;
@@ -323,7 +323,7 @@ kernel void nm_mixed_apply_operator_elements(
         electricGradient += accepted[index].primary.w * gradient;
         electricDirectionGradient += direction[index].z * gradient;
     }
-    const NMMixedMaterialGPU material = materials[object.materialIndex];
+    const NMMixedMaterialGPU material = materials[tetrahedron.identity.x];
     const float slope = max(material.coupling.y, 1.0e-6f);
     const float drive = 1.0f / (1.0f + exp(clamp(
         -(electric - material.coupling.x) * slope, -80.0f, 80.0f)));
@@ -453,15 +453,8 @@ kernel void nm_mixed_build_residual_diagonal(
     residual[global] = preconditioned[global] = direction[global] = float4(0.0f);
     if (range.objectIndex >= dispatch.objectCount) return;
     const NMContinuumObjectGPU object = objects[range.objectIndex];
-    if ((object.flags & NM_OBJECT_MULTIPHYSICS) == 0u ||
-        object.materialIndex >= dispatch.mixedMaterialCount) return;
-    const NMMixedMaterialGPU material = materials[object.materialIndex];
+    if ((object.flags & NM_OBJECT_MULTIPHYSICS) == 0u) return;
     const float dt = max(microstep.time.x, 1.0e-12f);
-    float4 mass, diffusion, source;
-    mixedTransportCoefficients(
-        material, dt, accepted[global].primary.w,
-        mass, diffusion, source
-    );
     float4 rhs = float4(0.0f);
     float4 diagonal = float4(0.0f);
     const uint nodeBase = environment * dispatch.femNodeCount;
@@ -471,7 +464,15 @@ kernel void nm_mixed_build_residual_diagonal(
         const NMTetrahedronGPU tetrahedron = environmentTetrahedron(
             dispatch, tetrahedra, environment, tetIndex
         );
-        if ((tetrahedron.identity.w & NM_OBJECT_ACTIVE) == 0u) continue;
+        if ((tetrahedron.identity.w & NM_OBJECT_ACTIVE) == 0u ||
+            tetrahedron.identity.x >= dispatch.mixedMaterialCount) continue;
+        const NMMixedMaterialGPU material =
+            materials[tetrahedron.identity.x];
+        float4 mass, diffusion, source;
+        mixedTransportCoefficients(
+            material, dt, accepted[global].primary.w,
+            mass, diffusion, source
+        );
         uint slot = 0u;
         for (; slot < 4u; ++slot)
             if (tetrahedron.nodes[slot] == node) break;
@@ -777,10 +778,10 @@ kernel void nm_mixed_certify(
         minimumJ = min(minimumJ, j);
         float constraint = 0.0f;
         if ((object.flags & NM_OBJECT_MIXED_FEM) != 0u &&
-            object.materialIndex < dispatch.mixedMaterialCount) {
+            tet.identity.x < dispatch.mixedMaterialCount) {
             constraint = log(max(j, 1.0e-20f));
             const NMMixedMaterialGPU material =
-                mixedMaterials[object.materialIndex];
+                mixedMaterials[tet.identity.x];
             const uint4 nodes = tet.nodes;
             const float temperature = 0.25f * (
                 candidateFields[nodeBase + nodes.x].primary.y +

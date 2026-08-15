@@ -414,6 +414,106 @@ numi::matter::CompiledWorld compileHeterogeneousFEMCase(
     return std::move(compiled.world);
 }
 
+numi::matter::CompiledWorld compileHeterogeneousMultiphysicsCase(
+    const bool swapMaterials
+) {
+    const auto parsed = numi::matter::parseMatterFile(NUMI_MATTER_MATERIAL);
+    require(parsed.succeeded(),
+        "heterogeneous multiphysics material did not parse");
+    auto slow = parsed.material;
+    auto fast = parsed.material;
+    slow.name = "heterogeneous_mixed_slow";
+    fast.name = "heterogeneous_mixed_fast";
+    for (auto* material : {&slow, &fast}) {
+        for (auto& parameter : material->parameters) {
+            if (parameter.name == "density") parameter.defaultValue = 1000.0;
+            if (parameter.name == "mu") parameter.defaultValue = 2.0e4;
+            if (parameter.name == "lambda") parameter.defaultValue = 2.0e5;
+        }
+        material->mixed.bulkModulus = 3.0e5;
+        material->mixed.thermalExpansion = 0.0;
+        material->mixed.heatCapacity = 1.0;
+        material->mixed.thermalConductivity = 0.05;
+        material->mixed.poreStorage = 1.0;
+        material->mixed.poreMobility = 0.02;
+        material->mixed.activationThreshold = 0.25;
+        material->mixed.activationSlope = 10.0;
+    }
+    slow.mixed.electricalConductivity = 0.10;
+    slow.mixed.activationDiffusivity = 0.02;
+    slow.mixed.activationOnRate = 2.0;
+    slow.mixed.activationOffRate = 1.0;
+    slow.mixed.maximumActiveTension = 20.0;
+    fast.mixed.electricalConductivity = 2.0;
+    fast.mixed.activationDiffusivity = 0.50;
+    fast.mixed.activationOnRate = 10.0;
+    fast.mixed.activationOffRate = 0.5;
+    fast.mixed.maximumActiveTension = 80.0;
+
+    numi::matter::WorldSource source;
+    source.environmentCount = 1u;
+    source.frameTimestep = 1.0 / 1000.0;
+    source.gravity = {0.0, 0.0, 0.0};
+    source.materials.push_back(std::move(slow));
+    source.materials.push_back(std::move(fast));
+
+    numi::matter::ObjectSource object;
+    object.name = swapMaterials
+        ? "heterogeneous_multiphysics_swapped"
+        : "heterogeneous_multiphysics_reference";
+    object.materialIndex = 0u;
+    object.representation = numi::matter::Representation::fem;
+    object.mixedFEM = true;
+    object.characteristicLength = 0.01;
+    object.femNodes = {
+        {0.0, 0.0, 0.0}, {0.01, 0.0, 0.0}, {0.0, 0.01, 0.0},
+        {0.0, 0.0, 0.01}, {0.0, 0.0, -0.01},
+    };
+    object.femFixedNodes = {0u, 1u, 2u};
+    object.multiphysics.enabled = true;
+    object.multiphysics.initialTemperature = 300.0;
+    object.multiphysics.initialPorePressure = 0.1;
+    object.multiphysics.initialElectricPotential = 0.0;
+    object.multiphysics.initialActivation = 0.0;
+    numi::matter::FieldBoundarySource ground;
+    ground.node = 0u;
+    ground.flags = NM_FIELD_DIRICHLET_ELECTRIC_POTENTIAL;
+    ground.stableIdentifier = 1u;
+    ground.value = {0.0, 0.0, 0.0, 0.0};
+    object.fieldBoundaries.push_back(ground);
+    numi::matter::FieldBoundarySource stimulus;
+    stimulus.node = 3u;
+    stimulus.flags = NM_FIELD_DIRICHLET_ELECTRIC_POTENTIAL;
+    stimulus.stableIdentifier = 2u;
+    stimulus.value = {0.0, 0.0, 1.0, 0.0};
+    object.fieldBoundaries.push_back(stimulus);
+    numi::matter::TetrahedronSource upper;
+    upper.nodes = {0u, 1u, 2u, 3u};
+    numi::matter::TetrahedronSource lower;
+    lower.nodes = {0u, 2u, 1u, 4u};
+    upper.materialIndex = swapMaterials ? 1u : 0u;
+    lower.materialIndex = swapMaterials ? 0u : 1u;
+    object.tetrahedra = {upper, lower};
+    source.objects.push_back(std::move(object));
+
+    numi::matter::CompileOptions options;
+    options.maximumRateExponent = 4u;
+    auto compiled = numi::matter::compileWorld(source, options);
+    std::string failure =
+        "heterogeneous multiphysics world did not compile";
+    for (const auto& diagnostic : compiled.diagnostics) {
+        failure += "; " + diagnostic.message;
+    }
+    require(compiled.succeeded(), failure);
+    require(compiled.world.fem.tetrahedra.size() == 2u &&
+            compiled.world.fem.tetrahedra[0].identity.x ==
+                upper.materialIndex &&
+            compiled.world.fem.tetrahedra[1].identity.x ==
+                lower.materialIndex,
+        "heterogeneous multiphysics lost element material ownership");
+    return std::move(compiled.world);
+}
+
 numi::matter::CompiledWorld compileMixedCase() {
     auto parsed = numi::matter::parseMatterFile(NUMI_MATTER_MATERIAL);
     require(parsed.succeeded(), "reference silicone material did not parse");
@@ -1087,6 +1187,7 @@ struct Outcome {
     double femMass = 0.0;
     std::array<double, 3> femMomentum{};
     std::uint64_t femStateFingerprint = 0u;
+    std::uint64_t femFieldFingerprint = 0u;
     std::uint32_t learnedRevision = 0u;
     float nonlinearResidual = 0.0f;
     float relativeCorrection = 0.0f;
@@ -2344,6 +2445,12 @@ Outcome runCase(
                     );
                 }
             }
+            if (!snapshot.femFields.empty()) {
+                outcome.femFieldFingerprint = fingerprintBytes(
+                    snapshot.femFields.data(),
+                    snapshot.femFields.size() * sizeof(NMFEMFieldStateGPU)
+                );
+            }
             for (const NMFEMFieldStateGPU& field : snapshot.femFields) {
                 outcome.minimumMechanicalPressure = std::min(
                     outcome.minimumMechanicalPressure, field.primary.x
@@ -2698,6 +2805,8 @@ int main(int argc, const char* argv[]) {
         const bool femHighDrop = argc == 2 && std::string_view(argv[1]) == "--fem-high-drop";
         const bool heterogeneousFEM = argc == 2 &&
             std::string_view(argv[1]) == "--heterogeneous-fem";
+        const bool heterogeneousMultiphysics = argc == 2 &&
+            std::string_view(argv[1]) == "--heterogeneous-multiphysics";
         require(
             argc == 1 || mixedOnly || statefulMPM || statefulFEM ||
                 femOnly || mpmOnly || mpmFree || mpmSingle ||
@@ -2710,8 +2819,9 @@ int main(int argc, const char* argv[]) {
                 articulatedFootPadSequence ||
                 identification || adaptiveDemotion ||
                 adaptivePromotion || adaptivePromotionRollback || femFree ||
-                femHighRate || femHighDrop || heterogeneousFEM,
-            "usage: metalrobo_matter_physics_probe [--poroelastic-compression|--articulated-foot-pad|--articulated-foot-pad-sequence|--mixed|--multiphysics|--topology-mutation|--topology-rollback|--cohesive-mutation|--small-scale-remesh|--puncture-mutation|--learned-material|--production-rollback|--stateful-mpm|--stateful-fem|--mpm|--mpm-free|--mpm-single|--mpm-single-contact|--mpm-gentle-contact|--mpm-batch|--mpm-rollback|--metal-world-coupling|--identification|--adaptive-demotion|--adaptive-promotion|--adaptive-promotion-rollback|--fem|--fem-free|--fem-high-rate|--fem-high-drop|--heterogeneous-fem]"
+                femHighRate || femHighDrop || heterogeneousFEM ||
+                heterogeneousMultiphysics,
+            "usage: metalrobo_matter_physics_probe [--poroelastic-compression|--articulated-foot-pad|--articulated-foot-pad-sequence|--mixed|--multiphysics|--topology-mutation|--topology-rollback|--cohesive-mutation|--small-scale-remesh|--puncture-mutation|--learned-material|--production-rollback|--stateful-mpm|--stateful-fem|--mpm|--mpm-free|--mpm-single|--mpm-single-contact|--mpm-gentle-contact|--mpm-batch|--mpm-rollback|--metal-world-coupling|--identification|--adaptive-demotion|--adaptive-promotion|--adaptive-promotion-rollback|--fem|--fem-free|--fem-high-rate|--fem-high-drop|--heterogeneous-fem|--heterogeneous-multiphysics]"
         );
         if (articulatedFootPad) {
             runArticulatedFootPadScene();
@@ -3039,6 +3149,61 @@ int main(int argc, const char* argv[]) {
                 << ",\"failed_steps\":0"
                 << "}\n";
         }
+        if (heterogeneousMultiphysics) {
+            const auto referenceWorld =
+                compileHeterogeneousMultiphysicsCase(false);
+            const auto swappedWorld =
+                compileHeterogeneousMultiphysicsCase(true);
+            const auto reference = runCase(
+                referenceWorld, "heterogeneous multiphysics reference",
+                false, false, 4u
+            );
+            const auto replay = runCase(
+                referenceWorld, "heterogeneous multiphysics exact replay",
+                false, false, 4u
+            );
+            const auto swapped = runCase(
+                swappedWorld, "heterogeneous multiphysics swapped",
+                false, false, 4u
+            );
+            require(reference.femStateFingerprint != 0u &&
+                    reference.femFieldFingerprint != 0u &&
+                    reference.femStateFingerprint ==
+                        replay.femStateFingerprint &&
+                    reference.femFieldFingerprint ==
+                        replay.femFieldFingerprint,
+                "heterogeneous multiphysics did not retain exact device replay");
+            require(reference.femFieldFingerprint !=
+                        swapped.femFieldFingerprint &&
+                    reference.maximumActivation > 0.0f &&
+                    swapped.maximumActivation > 0.0f &&
+                    reference.minimumDeterminant > 0.0f &&
+                    swapped.minimumDeterminant > 0.0f,
+                "swapping mixed element materials did not alter the live fields");
+            std::cout
+                << "{\"schema\":\"numi.matter.physics-probe.v3\""
+                << ",\"representation\":\"heterogeneous_multiphysics\""
+                << ",\"reference_state_fingerprint\":"
+                << reference.femStateFingerprint
+                << ",\"replay_state_fingerprint\":"
+                << replay.femStateFingerprint
+                << ",\"reference_field_fingerprint\":"
+                << reference.femFieldFingerprint
+                << ",\"replay_field_fingerprint\":"
+                << replay.femFieldFingerprint
+                << ",\"swapped_field_fingerprint\":"
+                << swapped.femFieldFingerprint
+                << ",\"reference_activation_max\":"
+                << reference.maximumActivation
+                << ",\"swapped_activation_max\":"
+                << swapped.maximumActivation
+                << ",\"reference_minimum_J\":"
+                << reference.minimumDeterminant
+                << ",\"swapped_minimum_J\":"
+                << swapped.minimumDeterminant
+                << ",\"failed_steps\":0"
+                << "}\n";
+        }
         if (mpmBatch) {
             constexpr std::uint32_t kBatchEnvironments = 32u;
             constexpr std::uint32_t kBatchControlSteps = 1u;
@@ -3101,7 +3266,7 @@ int main(int argc, const char* argv[]) {
             !articulatedFootPad && !articulatedFootPadSequence &&
             !mixedOnly && !mpmBatch && !statefulMPM && !statefulFEM &&
             !femOnly && !femFree && !femHighRate && !femHighDrop &&
-            !heterogeneousFEM) {
+            !heterogeneousFEM && !heterogeneousMultiphysics) {
             const bool withPlane = !mpmFree && !mpmSingle;
             const auto mpm = runCase(
                 compileCase(
@@ -3164,7 +3329,8 @@ int main(int argc, const char* argv[]) {
             !poroelasticCompression &&
             !articulatedFootPad && !articulatedFootPadSequence &&
             !identification && !adaptiveDemotion && !adaptivePromotion &&
-            !adaptivePromotionRollback && !heterogeneousFEM) {
+            !adaptivePromotionRollback && !heterogeneousFEM &&
+            !heterogeneousMultiphysics) {
             const bool withPlane = !femFree;
             const auto fem = runCase(
                 compileCase(
