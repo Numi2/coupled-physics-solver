@@ -853,7 +853,8 @@ PorcineJejunumClosureCoupon makePorcineJejunumClosureCoupon(
 PerfusedActiveJejunumClosureCoupon
 makePerfusedActiveJejunumClosureCoupon(
     const std::array<std::uint32_t, 4>& materialIndices,
-    const PerfusedActiveJejunumSpec& spec
+    const PerfusedActiveJejunumSpec& spec,
+    const bool punctureChannels
 ) {
     std::string validationError;
     if (!validatePerfusedActiveJejunumSpec(spec, &validationError)) {
@@ -966,9 +967,14 @@ makePerfusedActiveJejunumClosureCoupon(
         slabMaterials,
         false,
         "perfused_active_jejunal_enterotomy_coupon",
-        "Evidence-owned four-layer jejunal geometry, element materials, "
-        "mixed transport and activation; object-level serosa contact; no "
-        "heterogeneous puncture, cohesive mutation, or measured validation."
+        punctureChannels
+            ? "Evidence-owned four-layer jejunal geometry, element materials, "
+              "mixed transport, activation and mass-conserving puncture "
+              "channels; object-level serosa contact; no cohesive mutation "
+              "or measured validation."
+            : "Evidence-owned four-layer jejunal geometry, element materials, "
+              "mixed transport and activation; object-level serosa contact; "
+              "no mutation or measured validation."
     );
     built.object.multiphysics.enabled = true;
     built.object.multiphysics.initialTemperature =
@@ -978,6 +984,11 @@ makePerfusedActiveJejunumClosureCoupon(
         spec.initialPorePressurePa.value;
     built.object.multiphysics.initialElectricPotential = 0.0;
     built.object.multiphysics.initialActivation = 0.0;
+    if (punctureChannels) {
+        built.object.mutationPolicy.enabled = true;
+        built.object.mutationPolicy.cohesiveFracture = false;
+        built.object.femCapacity.punctureChannels = 64u;
+    }
 
     PerfusedActiveJejunumClosureCoupon result;
     result.object = std::move(built.object);

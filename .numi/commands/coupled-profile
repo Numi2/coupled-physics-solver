@@ -10,7 +10,7 @@ fi
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
     printf '%s\n' \
-        "Usage: numi coupled-profile [--mode metal4|tissue|perfused|coupled-perfused|heterogeneous|heterogeneous-mixed|heterogeneous-mutation] [--build-dir PATH] [--artifact-dir PATH] [--no-build] [--timeline-only]" \
+        "Usage: numi coupled-profile [--mode metal4|tissue|perfused|coupled-perfused|perfused-puncture|heterogeneous|heterogeneous-mixed|heterogeneous-mutation] [--build-dir PATH] [--artifact-dir PATH] [--no-build] [--timeline-only]" \
         "" \
         "Runs the selected probe twice, requires exact normalized replay, records" \
         "a Metal System Trace, exports GPU/error/counter tables, and attempts the" \
@@ -74,6 +74,11 @@ case "$profile_mode" in
         profile_argument=--perfused-tissue-coupling-only
         profile_gate='four-layer perfused-active tissue coupled to the live needle-swage-DER transaction; parameters are synthetic evidence-contract fixtures and puncture mutation is disabled'
         ;;
+    perfused-puncture)
+        profile_target=coupled_suture_handoff_probe
+        profile_argument=--perfused-tissue-puncture-only
+        profile_gate='mass-conserving tapered-needle channel through a flat four-layer perfused-active coupon with exact per-material topology identity; parameters and preactivation are synthetic evidence-contract fixtures, same-object collision and cohesive tearing are disabled'
+        ;;
     heterogeneous)
         profile_target=coupled_matter_physics_probe
         profile_argument=--heterogeneous-fem
@@ -89,7 +94,7 @@ case "$profile_mode" in
         profile_argument=--heterogeneous-puncture-mutation
         profile_gate='two-material cylindrical puncture with per-tetrahedron identity and density-accounting gates'
         ;;
-    *) printf '%s\n' "mode must be metal4, tissue, perfused, coupled-perfused, heterogeneous, heterogeneous-mixed, or heterogeneous-mutation" >&2; exit 2 ;;
+    *) printf '%s\n' "mode must be metal4, tissue, perfused, coupled-perfused, perfused-puncture, heterogeneous, heterogeneous-mixed, or heterogeneous-mutation" >&2; exit 2 ;;
 esac
 
 if [ -z "$profile_artifact" ]; then
@@ -177,6 +182,11 @@ if [ "$profile_mode" = perfused ]; then
 fi
 if [ "$profile_mode" = coupled-perfused ]; then
     grep -q 'perfused_tissue_suture_coupling=ok' \
+        "$profile_artifact/replay-a.stdout"
+    grep -q 'failed_steps=0' "$profile_artifact/replay-a.stdout"
+fi
+if [ "$profile_mode" = perfused-puncture ]; then
+    grep -q 'perfused_tissue_tapered_tip_puncture=ok' \
         "$profile_artifact/replay-a.stdout"
     grep -q 'failed_steps=0' "$profile_artifact/replay-a.stdout"
 fi

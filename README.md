@@ -54,6 +54,7 @@ numi coupled-profile --mode metal4
 numi coupled-profile --mode tissue
 numi coupled-profile --mode perfused
 numi coupled-profile --mode coupled-perfused
+numi coupled-profile --mode perfused-puncture
 numi coupled-profile --mode heterogeneous
 numi coupled-profile --mode heterogeneous-mixed
 numi coupled-profile --mode heterogeneous-mutation
@@ -78,10 +79,14 @@ tangent against an independent FP64 scalar evaluator, with a separate FP64
 directional-difference check. This is a constitutive-point parity boundary,
 not a full-step FP64 oracle. The `coupled-perfused` mode connects that same
 heterogeneous, active-field tissue directly to live DER strand contact through
-the hard needle swage. It deliberately disables puncture mutation until
-the four-layer needle/channel sequence is independently qualified. Both modes
-prove execution and replay, not ex-vivo calibration or indistinguishable
-visual/physical fidelity.
+the hard needle swage. The separate `perfused-puncture` mode admits a tapered
+needle from positive clearance, creates and releases one mass-conserving
+sub-element channel, and gates the active tetrahedron count of every layer
+against its authored material ownership. The focused flat fixture uses a
+synthetic 0.001 preactivation and disables same-object collision and cohesive
+tearing while retaining external needle contact. These modes prove execution
+and replay, not ex-vivo calibration or
+indistinguishable visual/physical fidelity.
 
 Promotion remains gated by exact replay, FP64 parity, physical outcomes, zero
 failed steps, and same-device Metal timeline/counter evidence. A successful

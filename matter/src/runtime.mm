@@ -1521,20 +1521,20 @@ RuntimeDiagnostics Runtime::initialize(
             valid, candidate->residentBytes);
         candidate->fgmresHessenberg = privateScratch<float>(
             candidate->device,
-            fgmresSystemTotal * (NM_MIXED_FGMRES_RESTART + 1u) *
-                NM_MIXED_FGMRES_RESTART,
+            fgmresSystemTotal * (configuredRestart + 1u) *
+                configuredRestart,
             valid, candidate->residentBytes);
         candidate->fgmresRotations = privateScratch<float>(
             candidate->device,
-            fgmresSystemTotal * NM_MIXED_FGMRES_RESTART * 2u,
+            fgmresSystemTotal * configuredRestart * 2u,
             valid, candidate->residentBytes);
         candidate->fgmresLeastSquares = privateScratch<float>(
             candidate->device,
-            fgmresSystemTotal * (NM_MIXED_FGMRES_RESTART + 1u),
+            fgmresSystemTotal * (configuredRestart + 1u),
             valid, candidate->residentBytes);
         candidate->fgmresRestartCoefficients = privateScratch<float>(
             candidate->device,
-            fgmresSystemTotal * (NM_MIXED_FGMRES_RESTART + 1u),
+            fgmresSystemTotal * (configuredRestart + 1u),
             valid, candidate->residentBytes);
         candidate->fgmresStates = privateScratch<NMFGMRESStateGPU>(
             candidate->device, fgmresSystemTotal,
@@ -3626,13 +3626,17 @@ RuntimeDiagnostics Runtime::encode(const EncodeRequest& request) {
             const float nonlinearTolerance = std::max(
                 state.mixedSolverValue.residualTolerances.x, 0.0f);
             const float forcingFloor = std::sqrt(nonlinearTolerance);
+            // Contact coupled to transport/activation needs a more faithful
+            // first Newton direction than the former 0.25 relative solve.
+            // Keep this device-local forcing schedule stricter without
+            // changing any authored nonlinear publication tolerance.
             const float scheduledForcing = std::ldexp(
-                0.25f,
+                0.15f,
                 -static_cast<int>(std::min(nonlinearIteration, 4u)));
             const float linearForcing = std::clamp(
                 std::max(forcingFloor, scheduledForcing),
                 nonlinearTolerance,
-                0.25f);
+                0.15f);
             NMMicrostepGPU operatorMicro = micro;
             operatorMicro.flags |= NM_MICROSTEP_FGMRES_OPERATOR;
             for (std::uint32_t restartCycle = 0u;

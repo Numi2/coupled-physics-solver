@@ -482,6 +482,24 @@ void verifyAdaptiveLayout() {
         "compiler accepted an unsupported FGMRES restart depth"
     );
 
+    auto unsupportedLineSearch = source;
+    unsupportedLineSearch.mixedSolver.lineSearchSteps =
+        NM_MIXED_LINE_SEARCH_MAX_STEPS + 1u;
+    const auto rejectedLineSearch =
+        numi::matter::compileWorld(unsupportedLineSearch);
+    require(
+        !rejectedLineSearch.succeeded() &&
+            std::ranges::any_of(
+                rejectedLineSearch.diagnostics,
+                [](const numi::matter::Diagnostic& diagnostic) {
+                    return diagnostic.message.find(
+                        "line search exceeds the compiled trial capacity"
+                    ) != std::string::npos;
+                }
+            ),
+        "compiler accepted an unsupported line-search trial count"
+    );
+
     auto unsupportedSmoother = source;
     unsupportedSmoother.mixedSolver.fieldSmootherPasses =
         NM_MIXED_FIELD_SMOOTHER_MAX_PASSES + 1u;
@@ -520,8 +538,10 @@ void verifyAdaptiveLayout() {
     );
     require(
         compiled.world.dispatch.particleCount == 2u &&
-            compiled.world.dispatch.tetrahedronCount == 1u,
-        "stateful compiler check did not retain both representations"
+            compiled.world.dispatch.tetrahedronCount == 1u &&
+            compiled.world.dispatch.fgmresRestartStride ==
+                source.mixedSolver.fgmresRestart,
+        "stateful compiler check lost representation or Krylov stride"
     );
     const NMMixedSolverGPU& mixedSolver = compiled.world.mixedSolver;
     require(

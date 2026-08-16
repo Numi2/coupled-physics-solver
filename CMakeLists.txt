@@ -227,6 +227,8 @@ if(BUILD_TESTING)
         COMMAND $<TARGET_FILE:coupled_suture_handoff_probe> --tissue-coupling-only)
     add_test(NAME coupled.suture.perfused_tissue_coupling
         COMMAND $<TARGET_FILE:coupled_suture_handoff_probe> --perfused-tissue-coupling-only)
+    add_test(NAME coupled.suture.perfused_tissue_puncture
+        COMMAND $<TARGET_FILE:coupled_suture_handoff_probe> --perfused-tissue-puncture-only)
     add_test(NAME coupled.evidence.trial_contract
         COMMAND $<TARGET_FILE:coupled_trial_evidence_probe>)
     add_test(NAME coupled.tissue.perfused_active_contract
@@ -242,6 +244,7 @@ if(BUILD_TESTING)
         coupled.matter.heterogeneous_mutation
         coupled.suture.tissue_coupling
         coupled.suture.perfused_tissue_coupling
+        coupled.suture.perfused_tissue_puncture
         coupled.evidence.trial_contract
         coupled.tissue.perfused_active_contract
         coupled.tissue.perfused_active_metal

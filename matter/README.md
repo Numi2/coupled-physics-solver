@@ -90,6 +90,13 @@ The FEM path uses linear tetrahedral kinematics with nonlinear constitutive stre
 
 IPC's squared-distance logarithmic potential contributes primal gradients and PSD Hessian actions; per-node timestep ratios apply the action chain rule to cross-rate FEM/MPM rows. There are no contact multiplier unknowns, response CSR, Delassus rows, or post-contact correction solves. Element work is parallel and node assembly uses rebuilt incidence. FGMRES uses compensated SIMD32 reductions, modified Gram-Schmidt with selective reorthogonalization, device Givens rotations, restart cycles and an inexact-Newton forcing schedule. The environment-owned SIMD32 Arnoldi wave continues directly from orthogonalization into its norm, Givens update and next-basis publication. Restart-residual reconstruction and the tiny triangular solve likewise share one per-environment cycle-finalization dispatch, and the final cycle does not materialize coefficients that no later cycle can consume. These fusions retain the original reduction and arithmetic order while removing command traffic. The right preconditioner combines FEM node-star diagonals, overlapping tetrahedron patches, MPM lumped/particle-patch/object modes, field smoothing, and rigid inverse-mass action. FGMRES remains the sole convergence owner. One environment-wide line search combines constitutive determinant and mixed-volume bounds with conservative CCD, barrier fraction-to-boundary caps, and barrier Armijo backtracking.
 
+ABI v24 records the authored FGMRES restart depth as the compact per-world
+matrix/vector stride. Accuracy-focused worlds may retain up to four SIMD32
+Arnoldi panels, while ordinary batched worlds allocate and clear only their
+configured depth instead of fanning the maximum capacity across environments.
+It also makes the compiled line-search ceiling explicit and certifies
+deformable CCD over the segment already retained by the FEM/field line search.
+
 ABI v23 marks an explicit needle capsule or circular arc as the puncture
 dilator. The sharp tip remains the only fracture authority, while each local
 mass-conserving channel segment records the largest flagged same-body gauge;

@@ -136,6 +136,11 @@ constexpr std::uint32_t kSuturePassageMatterRateMultiplier = 4u;
 constexpr double kSuturePullThroughSpeedMps = 8.0e-2;
 constexpr double kSutureOperativeFieldRadiusM = 4.5e-3;
 constexpr double kSutureTissueContactSlopM = 1.0e-4;
+// The mixed four-field operator starts in the outer 12% of the 100 um IPC
+// support rather than at the passive fixture's near-barrier 10 um diagnostic.
+// The tip still approaches from positive clearance and must independently
+// exceed the unchanged physical impulse and geometry-crossing gates.
+constexpr double kPerfusedPunctureInitialClearanceM = 8.8e-5;
 constexpr double kPerfusedDirectContactInitialClearanceM = 7.5e-5;
 // The receiver-frame construction targets 20 um beyond the accepted 100 um
 // distal clearance so FP32 pose storage cannot turn an exactly-on-threshold
@@ -3638,6 +3643,16 @@ std::string vectorSummary(const Vec3 value) {
         std::to_string(value.z) + "]";
 }
 
+std::string materialTetrahedronSummary(
+    const std::array<std::uint32_t, 4>& counts
+) {
+    return
+        "[" + std::to_string(counts[0]) + "," +
+        std::to_string(counts[1]) + "," +
+        std::to_string(counts[2]) + "," +
+        std::to_string(counts[3]) + "]";
+}
+
 struct CrossArmCollisionScan {
     std::uint32_t samplesWithContact = 0u;
     std::uint32_t firstContactStep = MR_INVALID_INDEX;
@@ -4247,7 +4262,9 @@ numi::matter::PerfusedJejunalLayerSpec couplingLayer(
     return result;
 }
 
-numi::matter::PerfusedActiveJejunumSpec couplingPerfusedTissueSpec() {
+numi::matter::PerfusedActiveJejunumSpec couplingPerfusedTissueSpec(
+    const bool directStrandContact
+) {
     numi::matter::PerfusedActiveJejunumSpec spec;
     spec.trialManifestSha256 = std::string(64u, 'a');
     spec.parameterBundleSha256 = std::string(64u, 'b');
@@ -4271,9 +4288,11 @@ numi::matter::PerfusedActiveJejunumSpec couplingPerfusedTissueSpec() {
             0.15, 980.0, 520.0, 0.0, 0.05, {0.0, 1.0, 0.0}),
     }};
     // Direct strand contact requires the qualified operative-field spacing;
-    // the compact 6x6 contract mesh cannot resolve the 0.20 mm contact band.
-    spec.longitudinalCells = 34u;
-    spec.circumferentialCells = 40u;
+    // puncture instead retains the production in-plane needle-entry mesh.
+    // Both paths retain eight through-thickness cells so every canonical
+    // layer owns at least one slab and the 0.10 mm wall spacing is resolved.
+    spec.longitudinalCells = directStrandContact ? 34u : 18u;
+    spec.circumferentialCells = directStrandContact ? 40u : 16u;
     spec.throughThicknessCells = 8u;
     return spec;
 }
@@ -4303,8 +4322,6 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
             matterCompileErrors(parsed.diagnostics)
     );
 
-    require(!perfusedLayers || !punctureTip,
-        "perfused layered coupling does not yet own topology mutation");
     const std::uint32_t sutureContactEdgeBegin =
         perfusedLayers ? kPerfusedSutureContactEdgeBegin : 0u;
     // Retain the source-sized 30 x 24 x 0.77 mm porcine coupon and 16 mm
@@ -4332,7 +4349,9 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
     std::string materialError;
     std::vector<numi::matter::MaterialProgram> tissueMaterials;
     if (perfusedLayers) {
-        const auto activeSpec = couplingPerfusedTissueSpec();
+        const auto activeSpec = couplingPerfusedTissueSpec(
+            sutureContactSegmentCount != 0u
+        );
         spec.lengthM.value = activeSpec.lengthM.value;
         spec.widthM.value = activeSpec.widthM.value;
         spec.thicknessM.value = activeSpec.thicknessM.value;
@@ -4357,11 +4376,17 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
         }
         auto activeCoupon =
             numi::matter::makePerfusedActiveJejunumClosureCoupon(
-                {0u, 1u, 2u, 3u}, activeSpec
+                {0u, 1u, 2u, 3u}, activeSpec, punctureTip
             );
         coupon.object = std::move(activeCoupon.object);
         coupon.metadata = std::move(activeCoupon.metadata);
         coupon.spec = spec;
+        if (punctureTip) {
+            // Exercise puncture against a genuinely active fibre state rather
+            // than a lower-bound activation transient. This 0.001 fixture
+            // value is synthetic and remains outside any calibration claim.
+            coupon.object.multiphysics.initialActivation = 0.001;
+        }
         double minimumX = coupon.object.femNodes.front()[0];
         double maximumX = minimumX;
         for (const auto& node : coupon.object.femNodes) {
@@ -4381,10 +4406,10 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
         ground.flags = NM_FIELD_DIRICHLET_ELECTRIC_POTENTIAL;
         ground.stableIdentifier = 1u;
         coupon.object.fieldBoundaries.push_back(ground);
-        // This qualification fixture is a flat, mutation-disabled coupon.
-        // Disable only same-object surface collision so sub-element surface
-        // spacing cannot manufacture dormant barriers; needle and live DER
-        // proxies remain fully coupled through external contact.
+        // This focused fixture remains flat and does not exercise folding.
+        // Disable only same-object surface collision so dormant barriers do
+        // not contaminate the external needle/DER qualification. External
+        // contact and mass-conserving channel mutation remain fully active.
         coupon.object.selfContact = false;
     } else {
         require(
@@ -4885,17 +4910,22 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
     source.deterministic = true;
     // The passive contact coupon reaches the identical accepted state by the
     // fifth encoded Newton pass. The coupled four-layer/contact system doubles
-    // the standalone perfused linear work ceiling because its live DER rows
-    // enlarge the same monolithic KKT system; acceptance tolerances remain
+    // the standalone perfused linear work ceiling because its live rigid/DER
+    // rows enlarge the same monolithic KKT system; acceptance tolerances remain
     // identical across both paths.
-    source.mixedSolver.newtonIterations = perfusedLayers ? 12u : 5u;
-    source.mixedSolver.fgmresRestart = perfusedLayers ? 16u : 10u;
+    source.mixedSolver.newtonIterations = perfusedLayers
+        ? (punctureTip ? 24u : 12u)
+        : 5u;
+    source.mixedSolver.fgmresRestart = perfusedLayers
+        ? (punctureTip ? 128u : 16u)
+        : 10u;
     // The contact-refined operative entry uses the full ten-column Arnoldi
     // cycle while closing its accepted nonlinear residual by over two orders
     // of magnitude. Do not encode empty restart cycles into every 62.5 us
     // surgical microstep; the live residual and certificate remain authority.
     source.mixedSolver.fgmresIterations = perfusedLayers ? 128u : 10u;
-    source.mixedSolver.lineSearchSteps = 12u;
+    source.mixedSolver.lineSearchSteps =
+        perfusedLayers && punctureTip ? 32u : 12u;
     source.mixedSolver.relativeResidual = 5.0e-4;
     source.mixedSolver.volumeTolerance = 5.0e-4;
     source.mixedSolver.pressureTolerance = 5.0e-4;
@@ -5209,6 +5239,7 @@ Arguments parseArguments(const int argc, const char* const argv[]) {
             argument == "--settle-only" ||
             argument == "--tissue-coupling-only" ||
             argument == "--perfused-tissue-coupling-only" ||
+            argument == "--perfused-tissue-puncture-only" ||
             argument == "--tissue-rest-only" ||
             argument == "--tissue-puncture-only" ||
             argument == "--tissue-puncture-advance-only" ||
@@ -6570,6 +6601,10 @@ int main(const int argc, const char* const argv[]) {
             options.mode == "--settle-only";
         const bool perfusedTissueCouplingOnly =
             options.mode == "--perfused-tissue-coupling-only";
+        const bool perfusedTissuePunctureOnly =
+            options.mode == "--perfused-tissue-puncture-only";
+        const bool perfusedTissue =
+            perfusedTissueCouplingOnly || perfusedTissuePunctureOnly;
         const bool tissueCouplingOnly =
             options.mode == "--tissue-coupling-only" ||
             perfusedTissueCouplingOnly;
@@ -6588,6 +6623,7 @@ int main(const int argc, const char* const argv[]) {
         const bool tissuePunctureOnly =
             options.mode == "--tissue-puncture-only" ||
             options.mode == "--tissue-puncture-advance-only" ||
+            perfusedTissuePunctureOnly ||
             tissueSutureEntryContactOnly ||
             tissueSuturePassageOnly ||
             options.mode == "--tissue-curved-passage-only" ||
@@ -11269,6 +11305,8 @@ int main(const int argc, const char* const argv[]) {
         numi::matter::Runtime tissueRuntime;
         numi::matter::CompiledWorld tissueWorld;
         numi::matter::PorcineJejunumClosureCoupon tissueCoupon;
+        std::array<std::uint32_t, 4>
+            tissueAuthoredMaterialTetrahedra{};
         std::optional<CurvedNeedleOrbit> tissueNeedleOrbit;
         double tissueNeedleAngularSpeedRadPerS = 0.0;
         if (tissueMatterOnly) {
@@ -11425,14 +11463,16 @@ int main(const int argc, const char* const argv[]) {
                 world,
                 needleForPlacement,
                 tissuePunctureOnly
-                    ? kPunctureInitialClearanceM
+                    ? (perfusedTissuePunctureOnly
+                        ? kPerfusedPunctureInitialClearanceM
+                        : kPunctureInitialClearanceM)
                     : (tissueRestOnly
                         ? 1.5e-4
                         : (perfusedTissueCouplingOnly
                             ? kPerfusedDirectContactInitialClearanceM
                             : 5.0e-5)),
                 tissuePunctureOnly,
-                perfusedTissueCouplingOnly,
+                perfusedTissue,
                 (tissueCurvedPassageOnly || tissueSutureEntryContactOnly)
                     ? kCurvedPassageContactSegmentCount
                     : 1u,
@@ -11440,6 +11480,27 @@ int main(const int argc, const char* const argv[]) {
                     ? kSutureMatterContactSegmentCount : 0u,
                 tissueCoupon
             );
+            if (perfusedTissue) {
+                for (const auto& tetrahedron :
+                     tissueCoupon.object.tetrahedra) {
+                    require(
+                        tetrahedron.materialIndex <
+                            tissueAuthoredMaterialTetrahedra.size(),
+                        "perfused tissue contains an unowned tetrahedron"
+                    );
+                    ++tissueAuthoredMaterialTetrahedra[
+                        tetrahedron.materialIndex];
+                }
+                require(
+                    std::ranges::all_of(
+                        tissueAuthoredMaterialTetrahedra,
+                        [](const std::uint32_t count) {
+                            return count != 0u;
+                        }
+                    ),
+                    "perfused tissue did not retain all four authored layers"
+                );
+            }
             const auto initialized = tissueRuntime.initialize(
                 tissueWorld,
                 {
@@ -11893,6 +11954,8 @@ int main(const int argc, const char* const argv[]) {
             }
             std::uint32_t activeChannels = 0u;
             std::uint32_t activeTetrahedra = 0u;
+            std::array<std::uint32_t, 4>
+                activeMaterialTetrahedra{};
             double removedMassKg = 0.0;
             const NMPunctureChannelGPU* acceptedChannel = nullptr;
             for (const NMPunctureChannelGPU& channel :
@@ -11905,8 +11968,14 @@ int main(const int argc, const char* const argv[]) {
             }
             for (const NMTetrahedronGPU& tetrahedron :
                  snapshot.femTopologyTetrahedra) {
-                activeTetrahedra +=
+                const bool active =
                     (tetrahedron.identity.w & NM_OBJECT_ACTIVE) != 0u;
+                activeTetrahedra += active;
+                if (active && tetrahedron.identity.x <
+                    activeMaterialTetrahedra.size()) {
+                    ++activeMaterialTetrahedra[
+                        tetrahedron.identity.x];
+                }
             }
             for (const NMFEMTopologyStateGPU& topology :
                  snapshot.topologyStates) {
@@ -11938,6 +12007,8 @@ int main(const int argc, const char* const argv[]) {
             std::uint32_t channelReleaseStrandContacts = 0u;
             std::uint32_t channelReleaseChannels = 0u;
             std::uint32_t channelReleaseLinks = 0u;
+            std::array<std::uint32_t, 4>
+                releaseMaterialTetrahedra{};
             double channelReleaseTotalLengthM = 0.0;
             double channelReleaseSignedNeedleMotionM = 0.0;
             double channelReleaseMinimumDeterminant = 0.0;
@@ -12092,6 +12163,9 @@ int main(const int argc, const char* const argv[]) {
                         acceptedChannel != nullptr &&
                         activeTetrahedra ==
                             tissueCoupon.metadata.tetrahedronCount &&
+                        (!perfusedTissuePunctureOnly ||
+                         activeMaterialTetrahedra ==
+                            tissueAuthoredMaterialTetrahedra) &&
                         removedMassKg == 0.0 &&
                         std::isfinite(removedToChannelTractMassRatio) &&
                         removedToChannelTractMassRatio == 0.0 &&
@@ -12124,6 +12198,14 @@ int main(const int argc, const char* const argv[]) {
                         " authored_tetrahedra=" +
                         std::to_string(
                             tissueCoupon.metadata.tetrahedronCount
+                        ) +
+                        " active_material_tetrahedra=" +
+                        materialTetrahedronSummary(
+                            activeMaterialTetrahedra
+                        ) +
+                        " authored_material_tetrahedra=" +
+                        materialTetrahedronSummary(
+                            tissueAuthoredMaterialTetrahedra
                         ) +
                         " removed_mass=" +
                         std::to_string(removedMassKg) +
@@ -13629,8 +13711,14 @@ int main(const int argc, const char* const argv[]) {
                 }
                 for (const NMTetrahedronGPU& tetrahedron :
                      releaseSnapshot.femTopologyTetrahedra) {
-                    releaseTetrahedra +=
+                    const bool active =
                         (tetrahedron.identity.w & NM_OBJECT_ACTIVE) != 0u;
+                    releaseTetrahedra += active;
+                    if (active && tetrahedron.identity.x <
+                        releaseMaterialTetrahedra.size()) {
+                        ++releaseMaterialTetrahedra[
+                            tetrahedron.identity.x];
+                    }
                 }
                 for (const NMFEMTopologyStateGPU& topology :
                      releaseSnapshot.topologyStates) {
@@ -13735,6 +13823,9 @@ int main(const int argc, const char* const argv[]) {
                             2.0 * expectedEntryTractLengthM) &&
                         releaseTetrahedra ==
                             tissueCoupon.metadata.tetrahedronCount &&
+                        (!perfusedTissuePunctureOnly ||
+                         releaseMaterialTetrahedra ==
+                            tissueAuthoredMaterialTetrahedra) &&
                         releaseRemovedMassKg == 0.0 &&
                         releaseCertificatesAccepted &&
                         std::isfinite(channelReleaseMinimumDeterminant) &&
@@ -13766,6 +13857,14 @@ int main(const int argc, const char* const argv[]) {
                         std::to_string(releaseGenerations.size()) +
                         " active_tetrahedra=" +
                         std::to_string(releaseTetrahedra) +
+                        " active_material_tetrahedra=" +
+                        materialTetrahedronSummary(
+                            releaseMaterialTetrahedra
+                        ) +
+                        " authored_material_tetrahedra=" +
+                        materialTetrahedronSummary(
+                            tissueAuthoredMaterialTetrahedra
+                        ) +
                         " removed_mass=" +
                         std::to_string(releaseRemovedMassKg) +
                         " minimum_determinant=" +
@@ -13821,11 +13920,13 @@ int main(const int argc, const char* const argv[]) {
                 << (tissueRestOnly
                     ? "tissue_static_equilibrium=ok"
                     : (tissuePunctureOnly
-                        ? (tissueSutureEntryOnly
-                            ? "tissue_suture_entry=ok"
-                            : (tissuePunctureAdvanceOnly
-                                ? "tissue_puncture_channel_advance=ok"
-                                : "tissue_tapered_tip_puncture=ok"))
+                        ? (perfusedTissuePunctureOnly
+                            ? "perfused_tissue_tapered_tip_puncture=ok"
+                            : (tissueSutureEntryOnly
+                                ? "tissue_suture_entry=ok"
+                                : (tissuePunctureAdvanceOnly
+                                    ? "tissue_puncture_channel_advance=ok"
+                                    : "tissue_tapered_tip_puncture=ok")))
                         : (perfusedTissueCouplingOnly
                             ? "perfused_tissue_suture_coupling=ok"
                             : "tissue_suture_coupling=ok")))
@@ -13858,6 +13959,14 @@ int main(const int argc, const char* const argv[]) {
                 << maximumFGMRESIterations
                 << " active_puncture_channels=" << activeChannels
                 << " active_tetrahedra=" << activeTetrahedra
+                << " active_material_tetrahedra="
+                << materialTetrahedronSummary(
+                    activeMaterialTetrahedra
+                )
+                << " authored_material_tetrahedra="
+                << materialTetrahedronSummary(
+                    tissueAuthoredMaterialTetrahedra
+                )
                 << " removed_tissue_mass_kg=" << removedMassKg
                 << " analytic_channel_tract_mass_kg="
                 << analyticChannelTractMassKg
@@ -13881,6 +13990,10 @@ int main(const int argc, const char* const argv[]) {
                 << channelReleaseChannels
                 << " channel_release_links="
                 << channelReleaseLinks
+                << " channel_release_material_tetrahedra="
+                << materialTetrahedronSummary(
+                    releaseMaterialTetrahedra
+                )
                 << " channel_release_total_length_m="
                 << channelReleaseTotalLengthM
                 << " channel_release_signed_needle_motion_m="

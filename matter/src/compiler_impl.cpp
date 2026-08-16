@@ -522,6 +522,12 @@ void validateWorld(
             "mixed solver FGMRES restart exceeds the compiled basis capacity",
         });
     }
+    if (solver.lineSearchSteps > NM_MIXED_LINE_SEARCH_MAX_STEPS) {
+        diagnostics.push_back({
+            Diagnostic::Severity::error, 0u, 0u,
+            "mixed solver line search exceeds the compiled trial capacity",
+        });
+    }
     if (solver.fieldSmootherPasses >
             NM_MIXED_FIELD_SMOOTHER_MAX_PASSES) {
         diagnostics.push_back({
@@ -2318,7 +2324,7 @@ CompileResult compileWorld(
         dispatch.contactPairCount
     ));
     dispatch.maximumRateExponent = options.maximumRateExponent;
-    dispatch.reservedSolver0 = 0u;
+    dispatch.fgmresRestartStride = source.mixedSolver.fgmresRestart;
     dispatch.identificationCandidateCount = source.identificationCandidates;
     const std::uint64_t eventStride =
         static_cast<std::uint64_t>(NM_EVENT_CLASS_COUNT) *

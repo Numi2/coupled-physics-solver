@@ -234,12 +234,14 @@ struct PerfusedActiveJejunumClosureCoupon {
 
 // Builds a four-layer, nonuniform through-thickness closure coupon and routes
 // every tetrahedron to its canonical identified material. Mixed fields are
-// initialized from the perfusion contract. Heterogeneous topology mutation is
-// deliberately disabled until its transactions preserve material identity.
+// initialized from the perfusion contract. Optional puncture-channel mutation
+// reserves only the sub-element channel arena; cohesive tearing and
+// node/tetrahedron mutation remain disabled.
 [[nodiscard]] PerfusedActiveJejunumClosureCoupon
 makePerfusedActiveJejunumClosureCoupon(
     const std::array<std::uint32_t, 4>& materialIndices,
-    const PerfusedActiveJejunumSpec& spec
+    const PerfusedActiveJejunumSpec& spec,
+    bool punctureChannels = false
 );
 
 // Applies the source coefficients and explicit 3-D regularization settings to

@@ -39,7 +39,7 @@ typedef struct NM_ALIGN16 nm_int4 {
 } nm_int4;
 #endif
 
-#define NM_MATTER_ABI_VERSION 23u
+#define NM_MATTER_ABI_VERSION 24u
 #define NM_INVALID_INDEX 0xffffffffu
 #define NM_EXPRESSION_STACK_CAPACITY 96u
 #define NM_MPM_STENCIL_WIDTH 27u
@@ -50,13 +50,16 @@ typedef struct NM_ALIGN16 nm_int4 {
 #define NM_MPM_MAX_PARTICLES_PER_BLOCK 256u
 #define NM_MAX_MATERIAL_STATE 16u
 #define NM_MIXED_NEWTON_ITERATIONS 7u
-// Maximum supported compiled basis depth.
-#define NM_MIXED_FGMRES_RESTART 16u
+// Maximum supported compiled basis depth. Four SIMD32 Arnoldi panels resolve
+// strongly coupled mixed/contact directions without a host decision or a
+// lossy short restart; ordinary worlds retain the smaller default.
+#define NM_MIXED_FGMRES_RESTART 128u
 // Measured production default. Worlds may author a larger supported
 // restart/total budget explicitly.
 #define NM_MIXED_FGMRES_DEFAULT_RESTART 10u
 #define NM_MIXED_FGMRES_ITERATIONS 10u
 #define NM_MIXED_LINE_SEARCH_STEPS 8u
+#define NM_MIXED_LINE_SEARCH_MAX_STEPS 32u
 #define NM_MIXED_FIELD_SMOOTHER_MAX_PASSES 3u
 #define NM_MIXED_MUTATION_RESTARTS 4u
 #define NM_LEARNED_MAX_LAYERS 8u
@@ -286,8 +289,9 @@ typedef struct NM_ALIGN16 NMMatterDispatchGPU {
     nm_u32 contactPairCount;
 
     nm_u32 maximumRateExponent;
-    // Reserved. ABI v20 removed the standalone FEM linear-iteration owner.
-    nm_u32 reservedSolver0;
+    // Per-environment compact FGMRES matrix/vector stride. This is the cooked
+    // restart depth, not the compiled maximum basis capacity.
+    nm_u32 fgmresRestartStride;
     nm_u32 identificationCandidateCount;
     nm_u32 eventStride;
 

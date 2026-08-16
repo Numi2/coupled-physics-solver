@@ -12,16 +12,21 @@ inline void fgmresCompensatedAdd(
 }
 
 inline uint fgmresMatrixIndex(
-    const uint object,
+    const NMMatterDispatchGPU dispatch,
+    const uint environment,
     const uint row,
     const uint column
 ) {
-    return (object * (NM_MIXED_FGMRES_RESTART + 1u) + row) *
-        NM_MIXED_FGMRES_RESTART + column;
+    const uint restart = dispatch.fgmresRestartStride;
+    return (environment * (restart + 1u) + row) * restart + column;
 }
 
-inline uint fgmresVectorIndex(const uint object, const uint row) {
-    return object * (NM_MIXED_FGMRES_RESTART + 1u) + row;
+inline uint fgmresVectorIndex(
+    const NMMatterDispatchGPU dispatch,
+    const uint environment,
+    const uint row
+) {
+    return environment * (dispatch.fgmresRestartStride + 1u) + row;
 }
 
 inline uint fgmresMPMBase(const NMMatterDispatchGPU dispatch) {
@@ -309,18 +314,18 @@ kernel void nm_fgmres_begin(
     }
     norm2 = simd_sum(norm2);
     maximumCandidateSpeedSquared = simd_max(maximumCandidateSpeedSquared);
+    const uint restart = dispatch.fgmresRestartStride;
     for (uint index = lane; index <
-         (NM_MIXED_FGMRES_RESTART + 1u) * NM_MIXED_FGMRES_RESTART;
+         (restart + 1u) * restart;
          index += 32u)
         hessenberg[environment *
-            (NM_MIXED_FGMRES_RESTART + 1u) *
-            NM_MIXED_FGMRES_RESTART + index] = 0.0f;
-    for (uint index = lane; index < NM_MIXED_FGMRES_RESTART; index += 32u)
-            rotations[environment * NM_MIXED_FGMRES_RESTART + index] =
+            (restart + 1u) * restart + index] = 0.0f;
+    for (uint index = lane; index < restart; index += 32u)
+        rotations[environment * restart + index] =
             float2(1.0f, 0.0f);
-    for (uint index = lane; index < NM_MIXED_FGMRES_RESTART + 1u;
+    for (uint index = lane; index < restart + 1u;
          index += 32u)
-        leastSquares[fgmresVectorIndex(environment, index)] = 0.0f;
+        leastSquares[fgmresVectorIndex(dispatch, environment, index)] = 0.0f;
     threadgroup_barrier(mem_flags::mem_device);
     const float norm = sqrt(max(norm2, 0.0f));
     const float firstNewtonNorm = nonlinearIteration == 0u &&
@@ -358,7 +363,7 @@ kernel void nm_fgmres_begin(
             initialNorm;
         const bool converged = completed || nonlinearConverged ||
             norm <= target;
-        leastSquares[fgmresVectorIndex(environment, 0u)] =
+        leastSquares[fgmresVectorIndex(dispatch, environment, 0u)] =
             completed ? 0.0f : norm;
         states[environment].diagnostics = float4(
             completed ? previousDiagnostics.x : norm,
@@ -1495,7 +1500,9 @@ kernel void nm_fgmres_orthogonalize_and_finish_column(
                     work[rigidBase + local].x);
         projection = simd_sum(projection);
         if (lane == 0u)
-            hessenberg[fgmresMatrixIndex(environment, row, column)] =
+            hessenberg[fgmresMatrixIndex(
+                dispatch, environment, row, column
+            )] =
                 projection;
         simdgroup_barrier(mem_flags::mem_device);
         for (uint local = lane; local < dispatch.femNodeCount; local += 32u)
@@ -1574,7 +1581,9 @@ kernel void nm_fgmres_orthogonalize_and_finish_column(
                         work[rigidBase + local].x);
             projection = simd_sum(projection);
             if (lane == 0u)
-                hessenberg[fgmresMatrixIndex(environment, row, column)] +=
+                hessenberg[fgmresMatrixIndex(
+                    dispatch, environment, row, column
+                )] +=
                     projection;
             simdgroup_barrier(mem_flags::mem_device);
             for (uint local = lane; local < dispatch.femNodeCount;
@@ -1633,15 +1642,17 @@ kernel void nm_fgmres_orthogonalize_and_finish_column(
     }
     const float norm = sqrt(max(norm2, 0.0f));
     if (lane == 0u) {
-        hessenberg[fgmresMatrixIndex(environment, column + 1u, column)] = norm;
+        hessenberg[fgmresMatrixIndex(
+            dispatch, environment, column + 1u, column
+        )] = norm;
         for (uint previous = 0u; previous < column; ++previous) {
             const float2 rotation = rotations[
-                environment * NM_MIXED_FGMRES_RESTART + previous
+                environment * dispatch.fgmresRestartStride + previous
             ];
-            const uint upperIndex = fgmresMatrixIndex(
+            const uint upperIndex = fgmresMatrixIndex(dispatch,
                 environment, previous, column
             );
-            const uint lowerIndex = fgmresMatrixIndex(
+            const uint lowerIndex = fgmresMatrixIndex(dispatch,
                 environment, previous + 1u, column
             );
             const float upper = hessenberg[upperIndex];
@@ -1649,9 +1660,9 @@ kernel void nm_fgmres_orthogonalize_and_finish_column(
             hessenberg[upperIndex] = rotation.x * upper + rotation.y * lower;
             hessenberg[lowerIndex] = -rotation.y * upper + rotation.x * lower;
         }
-        const uint diagonalIndex = fgmresMatrixIndex(
+        const uint diagonalIndex = fgmresMatrixIndex(dispatch,
             environment, column, column);
-        const uint subdiagonalIndex = fgmresMatrixIndex(
+        const uint subdiagonalIndex = fgmresMatrixIndex(dispatch,
             environment, column + 1u, column
         );
         const float diagonal = hessenberg[diagonalIndex];
@@ -1662,11 +1673,13 @@ kernel void nm_fgmres_orthogonalize_and_finish_column(
         const float2 rotation = magnitude > 1.0e-30f
             ? float2(diagonal / magnitude, subdiagonal / magnitude)
             : float2(1.0f, 0.0f);
-        rotations[environment * NM_MIXED_FGMRES_RESTART + column] = rotation;
+        rotations[
+            environment * dispatch.fgmresRestartStride + column
+        ] = rotation;
         hessenberg[diagonalIndex] = magnitude;
         hessenberg[subdiagonalIndex] = 0.0f;
-        const uint g0 = fgmresVectorIndex(environment, column);
-        const uint g1 = fgmresVectorIndex(environment, column + 1u);
+        const uint g0 = fgmresVectorIndex(dispatch, environment, column);
+        const uint g1 = fgmresVectorIndex(dispatch, environment, column + 1u);
         const float upper = leastSquares[g0];
         const float lower = leastSquares[g1];
         leastSquares[g0] = rotation.x * upper + rotation.y * lower;
@@ -1716,23 +1729,22 @@ kernel void nm_fgmres_finalize_cycle(
     if (global >= dispatch.environmentCount) return;
     const uint environment = global;
     device NMFGMRESStateGPU& state = states[environment];
-    const uint used = min(uint(state.diagnostics.w), min(
-        solver.nonlinearIterations.y, NM_MIXED_FGMRES_RESTART
-    ));
+    const uint used = min(
+        uint(state.diagnostics.w), dispatch.fgmresRestartStride);
     // Reconstruct the pre-backsolve least-squares residual while it is still
     // resident, then continue into the tiny triangular solve in this same
     // per-environment dispatch. The measured production budget is one cycle,
     // so do no coefficient work unless another encoded cycle will consume it.
     if (finalRestartCycle == 0u) {
-        const uint restartBase =
-            environment * (NM_MIXED_FGMRES_RESTART + 1u);
-        for (uint row = 0u; row < NM_MIXED_FGMRES_RESTART + 1u; ++row)
+        const uint restart = dispatch.fgmresRestartStride;
+        const uint restartBase = environment * (restart + 1u);
+        for (uint row = 0u; row < restart + 1u; ++row)
             restartCoefficients[restartBase + row] = 0.0f;
         restartCoefficients[restartBase + used] =
-            leastSquares[fgmresVectorIndex(environment, used)];
+            leastSquares[fgmresVectorIndex(dispatch, environment, used)];
         for (int row = int(used) - 1; row >= 0; --row) {
             const float2 rotation = rotations[
-                environment * NM_MIXED_FGMRES_RESTART + uint(row)];
+                environment * restart + uint(row)];
             const float upper = restartCoefficients[
                 restartBase + uint(row)];
             const float lower = restartCoefficients[
@@ -1755,15 +1767,19 @@ kernel void nm_fgmres_finalize_cycle(
         );
     }
     for (int row = int(used) - 1; row >= 0; --row) {
-        float value = leastSquares[fgmresVectorIndex(environment, uint(row))];
+        float value = leastSquares[fgmresVectorIndex(
+            dispatch, environment, uint(row)
+        )];
         for (uint column = uint(row) + 1u; column < used; ++column)
-            value -= hessenberg[fgmresMatrixIndex(
+            value -= hessenberg[fgmresMatrixIndex(dispatch,
                 environment, uint(row), column
-            )] * leastSquares[fgmresVectorIndex(environment, column)];
+            )] * leastSquares[fgmresVectorIndex(
+                dispatch, environment, column
+            )];
         const float diagonal = hessenberg[
-            fgmresMatrixIndex(environment, uint(row), uint(row))
+            fgmresMatrixIndex(dispatch, environment, uint(row), uint(row))
         ];
-        leastSquares[fgmresVectorIndex(environment, uint(row))] =
+        leastSquares[fgmresVectorIndex(dispatch, environment, uint(row))] =
             abs(diagonal) > solver.regularization.x ? value / diagonal : 0.0f;
     }
     const float relativeResidual = state.diagnostics.y > 0.0f
@@ -1809,11 +1825,12 @@ kernel void nm_fgmres_restart_residual_nodes(
     const uint objectIndex = nodeRanges[global].objectIndex;
     if (objectIndex == NM_INVALID_INDEX || objectIndex >= dispatch.objectCount)
         return;
-    const uint used = min(uint(states[environment].diagnostics.w),
-                          NM_MIXED_FGMRES_RESTART);
+    const uint used = min(
+        uint(states[environment].diagnostics.w),
+        dispatch.fgmresRestartStride);
     const uint totalUnknowns = fgmresUnknownCount(dispatch);
     const uint coefficientBase = environment *
-        (NM_MIXED_FGMRES_RESTART + 1u);
+        (dispatch.fgmresRestartStride + 1u);
     float4 mechanical = float4(0.0f);
     float4 field = float4(0.0f);
     for (uint row = 0u; row <= used; ++row) {
@@ -1841,10 +1858,10 @@ kernel void nm_fgmres_restart_residual_rigid(
     const uint row = fgmresRigidBase(dispatch) + global;
     const uint used = min(
         uint(states[environment].diagnostics.w),
-        NM_MIXED_FGMRES_RESTART);
+        dispatch.fgmresRestartStride);
     const uint totalUnknowns = fgmresUnknownCount(dispatch);
     const uint coefficientBase = environment *
-        (NM_MIXED_FGMRES_RESTART + 1u);
+        (dispatch.fgmresRestartStride + 1u);
     float value = 0.0f;
     for (uint basisRow = 0u; basisRow <= used; ++basisRow)
         value += coefficients[coefficientBase + basisRow] *
@@ -1869,15 +1886,15 @@ kernel void nm_fgmres_accumulate(
     const uint objectIndex = nodeRanges[global].objectIndex;
     if (objectIndex == NM_INVALID_INDEX || objectIndex >= dispatch.objectCount)
         return;
-    const uint used = min(uint(states[environment].diagnostics.w), min(
-        solver.nonlinearIterations.y, NM_MIXED_FGMRES_RESTART
-    ));
+    const uint used = min(
+        uint(states[environment].diagnostics.w),
+        min(solver.nonlinearIterations.y, dispatch.fgmresRestartStride));
     float4 value = float4(0.0f);
     const uint totalUnknowns = fgmresUnknownCount(dispatch);
     for (uint column = 0u; column < used; ++column)
         value += preconditionedBasis[
             column * totalUnknowns + global
-        ] * leastSquares[fgmresVectorIndex(environment, column)];
+        ] * leastSquares[fgmresVectorIndex(dispatch, environment, column)];
     if (restartCycle == 0u) solution[global] = value;
     else solution[global] += value;
 }
@@ -1899,14 +1916,15 @@ kernel void nm_fgmres_accumulate_fields(
     const uint objectIndex = nodeRanges[global].objectIndex;
     if (objectIndex == NM_INVALID_INDEX || objectIndex >= dispatch.objectCount)
         return;
-    const uint used = min(uint(states[environment].diagnostics.w), min(
-        solver.nonlinearIterations.y, NM_MIXED_FGMRES_RESTART));
+    const uint used = min(
+        uint(states[environment].diagnostics.w),
+        min(solver.nonlinearIterations.y, dispatch.fgmresRestartStride));
     const uint totalUnknowns = fgmresUnknownCount(dispatch);
     const uint fieldIndex = totalNodes + global;
     float4 value = float4(0.0f);
     for (uint column = 0u; column < used; ++column)
         value += preconditionedBasis[column * totalUnknowns + fieldIndex] *
-            leastSquares[fgmresVectorIndex(environment, column)];
+            leastSquares[fgmresVectorIndex(dispatch, environment, column)];
     if (restartCycle == 0u) solution[fieldIndex] = value;
     else solution[fieldIndex] += value;
 }
@@ -1926,13 +1944,14 @@ kernel void nm_fgmres_accumulate_rigid(
     if (global >= total || dispatch.rigidGeneralizedCapacity == 0u) return;
     const uint environment = global / dispatch.rigidGeneralizedCapacity;
     const uint row = fgmresRigidBase(dispatch) + global;
-    const uint used = min(uint(states[environment].diagnostics.w), min(
-        solver.nonlinearIterations.y, NM_MIXED_FGMRES_RESTART));
+    const uint used = min(
+        uint(states[environment].diagnostics.w),
+        min(solver.nonlinearIterations.y, dispatch.fgmresRestartStride));
     const uint totalUnknowns = fgmresUnknownCount(dispatch);
     float value = 0.0f;
     for (uint column = 0u; column < used; ++column)
         value += preconditionedBasis[column * totalUnknowns + row].x *
-            leastSquares[fgmresVectorIndex(environment, column)];
+            leastSquares[fgmresVectorIndex(dispatch, environment, column)];
     if (restartCycle == 0u)
         solution[row] = float4(value, 0.0f, 0.0f, 0.0f);
     else
@@ -2806,13 +2825,14 @@ kernel void nm_fgmres_accumulate_mpm(
     if (global >= total) return;
     const uint environment = global / dispatch.mpmActiveNodeCapacity;
     const uint row = fgmresMPMBase(dispatch) + global;
-    const uint used = min(uint(states[environment].diagnostics.w), min(
-        solver.nonlinearIterations.y, NM_MIXED_FGMRES_RESTART));
+    const uint used = min(
+        uint(states[environment].diagnostics.w),
+        min(solver.nonlinearIterations.y, dispatch.fgmresRestartStride));
     const uint totalUnknowns = fgmresUnknownCount(dispatch);
     float4 value = float4(0.0f);
     for (uint column = 0u; column < used; ++column)
         value += preconditionedBasis[column * totalUnknowns + row] *
-            leastSquares[fgmresVectorIndex(environment, column)];
+            leastSquares[fgmresVectorIndex(dispatch, environment, column)];
     if (restartCycle == 0u) solution[row] = value;
     else solution[row] += value;
 }
@@ -2830,11 +2850,12 @@ kernel void nm_fgmres_restart_residual_mpm(
     if (global >= total) return;
     const uint environment = global / dispatch.mpmActiveNodeCapacity;
     const uint row = fgmresMPMBase(dispatch) + global;
-    const uint used = min(uint(states[environment].diagnostics.w),
-                          NM_MIXED_FGMRES_RESTART);
+    const uint used = min(
+        uint(states[environment].diagnostics.w),
+        dispatch.fgmresRestartStride);
     const uint totalUnknowns = fgmresUnknownCount(dispatch);
     const uint coefficientBase = environment *
-        (NM_MIXED_FGMRES_RESTART + 1u);
+        (dispatch.fgmresRestartStride + 1u);
     float4 value = float4(0.0f);
     for (uint basisRow = 0u; basisRow <= used; ++basisRow)
         value += coefficients[coefficientBase + basisRow] *

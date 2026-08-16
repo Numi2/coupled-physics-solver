@@ -2925,10 +2925,17 @@ kernel void nm_contact_limit_deformable_line_search(
         }
         if (!geometryValid) continue;
 
-        // Certify the complete Newton correction against actual feature
-        // geometry. Candidates may live inside the activation thickness; the
-        // conservative CCD boundary is a small positive distance from true
-        // intersection, not the barrier activation distance itself.
+        // The FEM/field line search has already bounded this Newton direction.
+        // Certify exactly that retained segment against feature geometry; CCD
+        // on the unscaled direction can inflate the FP32 coordinate floor by
+        // orders of magnitude and reject a segment the solver will never
+        // traverse. Convert any scaled-segment TOI back to full-direction
+        // alpha below. Candidates may live inside the activation thickness;
+        // the conservative CCD boundary remains a small positive distance
+        // from true intersection, not the barrier activation distance itself.
+        float3 feasibleDisplacement[4];
+        for (uint local = 0u; local < 4u; ++local)
+            feasibleDisplacement[local] = existing * displacement[local];
         float coordinateScale = dispatch.numericalLimits.x;
         for (uint local = 0u; local < 4u; ++local) {
             if (contact.nodes[local] == NM_INVALID_INDEX) continue;
@@ -2936,7 +2943,7 @@ kernel void nm_contact_limit_deformable_line_search(
                 coordinateScale, maximumAbsoluteCoordinate(position[local]));
             coordinateScale = max(coordinateScale,
                 maximumAbsoluteCoordinate(
-                    position[local] + displacement[local]));
+                    position[local] + feasibleDisplacement[local]));
         }
         const float collisionThickness = max(
             solver.contactAcceptance.x * dispatch.numericalLimits.x,
@@ -2948,28 +2955,28 @@ kernel void nm_contact_limit_deformable_line_search(
         bool hit = false;
         if (contact.identity.z == NM_DEFORMABLE_CONTACT_POINT_POINT) {
             hit = pointPointCCD(
-                position[0], position[0] + displacement[0],
-                position[1], position[1] + displacement[1],
+                position[0], position[0] + feasibleDisplacement[0],
+                position[1], position[1] + feasibleDisplacement[1],
                 collisionThickness, toi, ccdNormal, ccdPoint,
                 ccdSeparation, certified);
         } else if (contact.identity.z ==
                    NM_DEFORMABLE_CONTACT_VERTEX_TRIANGLE) {
             float3 barycentric;
             hit = vertexTriangleCCD(
-                position[0], position[0] + displacement[0],
-                position[1], position[1] + displacement[1],
-                position[2], position[2] + displacement[2],
-                position[3], position[3] + displacement[3],
+                position[0], position[0] + feasibleDisplacement[0],
+                position[1], position[1] + feasibleDisplacement[1],
+                position[2], position[2] + feasibleDisplacement[2],
+                position[3], position[3] + feasibleDisplacement[3],
                 collisionThickness, toi, ccdNormal, barycentric,
                 ccdPoint, ccdSeparation, certified);
         } else if (contact.identity.z ==
                    NM_DEFORMABLE_CONTACT_EDGE_EDGE) {
             float2 parameters;
             hit = edgeEdgeCCD(
-                position[0], position[0] + displacement[0],
-                position[1], position[1] + displacement[1],
-                position[2], position[2] + displacement[2],
-                position[3], position[3] + displacement[3],
+                position[0], position[0] + feasibleDisplacement[0],
+                position[1], position[1] + feasibleDisplacement[1],
+                position[2], position[2] + feasibleDisplacement[2],
+                position[3], position[3] + feasibleDisplacement[3],
                 collisionThickness, toi, ccdNormal, parameters,
                 ccdPoint, ccdSeparation, certified);
         }
@@ -2982,7 +2989,10 @@ kernel void nm_contact_limit_deformable_line_search(
             bound = 0.0f;
             continue;
         }
-        if (hit) bound = min(bound, clamp(0.9f * toi, 0.0f, 1.0f));
+        if (hit) bound = min(
+            bound,
+            existing * clamp(0.9f * toi, 0.0f, 1.0f)
+        );
 
         const float gap = dot(
             contact.normalAndTOI.xyz, weightedPosition) -

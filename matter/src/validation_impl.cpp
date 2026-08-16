@@ -170,7 +170,10 @@ private:
             static_cast<std::uint64_t>(NM_EVENT_CLASS_COUNT) *
             dispatch.objectCount;
         if (dispatch.maximumRateExponent > NM_MAX_RATE_EXPONENT ||
-            dispatch.reservedSolver0 != 0u ||
+            dispatch.fgmresRestartStride == 0u ||
+            dispatch.fgmresRestartStride > NM_MIXED_FGMRES_RESTART ||
+            dispatch.fgmresRestartStride !=
+                world_.mixedSolver.nonlinearIterations.y ||
             dispatch.maximumParticlesPerBlock !=
                 NM_MPM_MAX_PARTICLES_PER_BLOCK ||
             dispatch.materialStateStride > NM_MAX_MATERIAL_STATE ||

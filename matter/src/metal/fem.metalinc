@@ -1197,13 +1197,20 @@ kernel void nm_fem_select_backtracking(
     const NMAdaptiveStateGPU adaptiveState = adaptive[global];
     if (object.representation != NM_REPRESENTATION_FEM ||
         !objectDue(object, scheduler, adaptiveState, microstep)) return;
-    const uint candidateCount = min(solver.nonlinearIterations.w, 8u);
+    const uint candidateCount = min(
+        solver.nonlinearIterations.w,
+        uint(NM_MIXED_LINE_SEARCH_MAX_STEPS)
+    );
     const float dt = objectTimestep(dispatch, scheduler);
     float chosen = 0.0f;
     float chosenMinimum = -INFINITY;
+    float rejectedMinimumTemperature = INFINITY;
+    float rejectedMinimumActivation = INFINITY;
     for (uint trial = 0u; trial < candidateCount; ++trial) {
         const float alpha = exp2(-float(trial));
         float minimumJ = INFINITY;
+        float minimumTrialTemperature = INFINITY;
+        float minimumTrialActivation = INFINITY;
         float currentVolumeMerit2 = 0.0f;
         float trialVolumeMerit2 = 0.0f;
         uint volumeElementCount = 0u;
@@ -1266,6 +1273,10 @@ kernel void nm_fem_select_backtracking(
                     );
                     const float4 trialField = currentField +
                         alpha * correction[totalNodes + index];
+                    minimumTrialTemperature = min(
+                        minimumTrialTemperature, trialField.x);
+                    minimumTrialActivation = min(
+                        minimumTrialActivation, trialField.w);
                     valid = valid && all(isfinite(trialField)) &&
                         trialField.x >= solver.globalization.y &&
                         trialField.w >= -solver.globalization.z &&
@@ -1305,9 +1316,11 @@ kernel void nm_fem_select_backtracking(
                     currentVolumeMerit);
         const bool boundedTrustFallback = trial + 1u == candidateCount;
         valid = valid && (volumeArmijo || boundedTrustFallback);
+        chosenMinimum = minimumJ;
+        rejectedMinimumTemperature = minimumTrialTemperature;
+        rejectedMinimumActivation = minimumTrialActivation;
         if (valid) {
             chosen = alpha;
-            chosenMinimum = minimumJ;
             break;
         }
     }
@@ -1318,7 +1331,12 @@ kernel void nm_fem_select_backtracking(
         recordFailure(
             statuses[environment], NM_STATUS_NONLINEAR_SOLVER_FAILURE,
             objectIndex, microstep.solverIteration,
-            float4(chosenMinimum, float(candidateCount), 0.0f, 0.0f)
+            float4(
+                chosenMinimum,
+                rejectedMinimumTemperature,
+                rejectedMinimumActivation,
+                float(candidateCount)
+            )
         );
     }
 }
