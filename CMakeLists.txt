@@ -217,6 +217,8 @@ target_compile_definitions(coupled_metal4_execution_probe PRIVATE
 if(BUILD_TESTING)
     add_test(NAME coupled.matter.metal_world
         COMMAND $<TARGET_FILE:coupled_matter_physics_probe> --metal-world-coupling)
+    add_test(NAME coupled.matter.device_failure_accounting
+        COMMAND $<TARGET_FILE:coupled_matter_physics_probe> --device-failure-accounting)
     add_test(NAME coupled.matter.heterogeneous_fem
         COMMAND $<TARGET_FILE:coupled_matter_physics_probe> --heterogeneous-fem)
     add_test(NAME coupled.matter.heterogeneous_multiphysics

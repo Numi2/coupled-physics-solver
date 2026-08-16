@@ -15151,6 +15151,8 @@ MetalWorldDiagnostics validateAndPublish(
         diagnostics.layout.dispatch;
     const bool contactMode =
         (dispatch.flags & MR_METAL_WORLD_CONTACTS) != 0u;
+    const bool devicePhysicsMode =
+        diagnostics.layout.devicePhysicsFingerprint != 0u;
     const MRMetalWorldContactDispatchGPU& contactDispatch =
         diagnostics.layout.contactDispatch;
     const std::size_t observationWidth =
@@ -15575,7 +15577,8 @@ MetalWorldDiagnostics validateAndPublish(
             } else {
                 if (status.successfulSubsteps >=
                         dispatch.physicsSubsteps ||
-                    (status.abaCode == MR_ABA_SUCCESS &&
+                    (!devicePhysicsMode &&
+                     status.abaCode == MR_ABA_SUCCESS &&
                      (contactStatus == nullptr ||
                       contactStatus->code == MR_STEP_SUCCESS)) ||
                     status.failingSubstep >=

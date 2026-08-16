@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -144,6 +145,74 @@ void encodeRigidWorldFailure(
         (void)source;
     }];
 }
+
+struct DeviceFailureInjection {
+    std::uint32_t worldSubstep = 0u;
+};
+
+bool encodeDeviceFailure(
+    void* context,
+    const metalrobo::MetalWorldDevicePhysicsPass& pass
+) {
+    const auto* injection = static_cast<const DeviceFailureInjection*>(context);
+    if (injection == nullptr || pass.commandBuffer == nullptr ||
+        pass.environmentStatuses == nullptr) {
+        return false;
+    }
+    if (pass.phase !=
+            metalrobo::MetalWorldDevicePhysicsPhase::preDynamics ||
+        pass.physicsSubstep != injection->worldSubstep) {
+        return true;
+    }
+    struct FailureFields {
+        std::uint32_t code;
+        std::uint32_t substep;
+        std::uint32_t index;
+    };
+    const FailureFields fields{
+        MR_STEP_DID_NOT_CONVERGE,
+        pass.physicsSubstep,
+        MR_INVALID_INDEX,
+    };
+    id<MTLCommandBuffer> commandBuffer =
+        (__bridge id<MTLCommandBuffer>)pass.commandBuffer;
+    id<MTLBuffer> destination =
+        (__bridge id<MTLBuffer>)pass.environmentStatuses;
+    id<MTLDevice> device = commandBuffer.commandQueue.device;
+    if (device == nil || destination == nil ||
+        destination.length < sizeof(MRMetalWorldStatusGPU)) {
+        return false;
+    }
+    id<MTLBuffer> source = [device
+        newBufferWithBytes:&fields
+        length:sizeof(fields)
+        options:MTLResourceStorageModeShared];
+    id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
+    if (source == nil || blit == nil) {
+        return false;
+    }
+    blit.label = @"Matter probe device-physics failure injection";
+    [blit copyFromBuffer:source sourceOffset:offsetof(FailureFields, code)
+        toBuffer:destination
+        destinationOffset:offsetof(MRMetalWorldStatusGPU, code)
+        size:sizeof(fields.code)];
+    [blit copyFromBuffer:source sourceOffset:offsetof(FailureFields, substep)
+        toBuffer:destination
+        destinationOffset:offsetof(MRMetalWorldStatusGPU, failingSubstep)
+        size:sizeof(fields.substep)];
+    [blit copyFromBuffer:source sourceOffset:offsetof(FailureFields, index)
+        toBuffer:destination
+        destinationOffset:offsetof(MRMetalWorldStatusGPU, failingIndex)
+        size:sizeof(fields.index)];
+    [blit endEncoding];
+    [commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+        (void)completed;
+        (void)source;
+    }];
+    return true;
+}
+
+void abortDeviceFailure(void*, void*) {}
 
 numi::matter::CompiledWorld compileCase(
     const numi::matter::Representation representation,
@@ -1724,6 +1793,212 @@ void runAdaptiveTransfer(
     }
 }
 
+void runDeviceFailureAccounting() {
+    @autoreleasepool {
+        constexpr std::uint32_t kPhysicsSubsteps = 4u;
+        constexpr std::uint32_t kFailingSubstep = 3u;
+        const metalrobo::EngineModel model =
+            metalrobo::makeFreeSphereEngineModel();
+        metalrobo::CompiledWorld world;
+        const auto compiled = metalrobo::compileMetalWorld(model, 0u, world);
+        require(compiled.succeeded(),
+            "device-failure world compilation failed: " + compiled.message);
+
+        DeviceFailureInjection injection{kFailingSubstep};
+        metalrobo::MetalWorldStepConfig config{};
+        config.timestepSeconds = 1.0f / 240.0f;
+        config.physicsSubsteps = kPhysicsSubsteps;
+        config.solverMode = metalrobo::MetalWorldSolverMode::freeMotionABA;
+        config.devicePhysicsProgram = {
+            .context = &injection,
+            .encode = &encodeDeviceFailure,
+            .abort = &abortDeviceFailure,
+            .fingerprint = 0x4445564943454641ull,
+        };
+        require(config.devicePhysicsProgram.valid(),
+            "device-failure program is invalid");
+
+        const std::vector<float> efforts(world.nv(), 0.0f);
+        const metalrobo::MetalWorldBatch batch{
+            .environmentCount = 1u,
+            .controlStepCount = 1u,
+            .initialQ = model.defaultQ,
+            .initialV = model.defaultV,
+            .efforts = efforts,
+        };
+        metalrobo::MetalWorldContext context;
+        metalrobo::MetalWorldResult result;
+        const auto ran = context.run(world, batch, config, result);
+        require(
+            ran.status == metalrobo::MetalWorldHostStatus::gpuEnvironmentFailure &&
+                ran.published && ran.successfulStepCount == 0u &&
+                ran.failedStepCount == 1u &&
+                ran.firstFailingEnvironment == 0u &&
+                ran.firstFailingControlStep == 0u &&
+                ran.firstGPUStatusCode == MR_STEP_DID_NOT_CONVERGE,
+            "typed device failure was not published as a GPU environment rollback: " +
+                ran.message
+        );
+        require(result.statuses.size() == 1u,
+            "device failure did not publish its world status");
+        const MRMetalWorldStatusGPU& status = result.statuses[0];
+        require(
+            status.code == MR_STEP_DID_NOT_CONVERGE &&
+                status.abaCode == MR_ABA_SUCCESS &&
+                status.successfulSubsteps == kFailingSubstep &&
+                status.failingSubstep == kFailingSubstep &&
+                status.failingIndex == MR_INVALID_INDEX,
+            "device failure lost its typed substep accounting"
+        );
+        require(result.finalQ == model.defaultQ &&
+                result.finalV == model.defaultV,
+            "device failure did not restore the control-step checkpoint");
+        std::cout
+            << "{\"schema\":\"numi.matter.device-failure.v1\""
+            << ",\"world_failure_status\":" << status.code
+            << ",\"successful_substeps\":" << status.successfulSubsteps
+            << ",\"failing_world_substep\":" << status.failingSubstep
+            << ",\"aba_status\":" << status.abaCode
+            << ",\"transaction_rollback\":true}\n";
+    }
+}
+
+void runMatterWorldSubstepMapping() {
+    @autoreleasepool {
+        constexpr std::uint32_t kWorldSubstep = 3u;
+        auto world = compileCase(
+            numi::matter::Representation::fem,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            1.0 / 240.0,
+            1u,
+            0u,
+            0u,
+            false,
+            false,
+            true
+        );
+        numi::matter::Runtime runtime;
+        const auto initialized = runtime.initialize(world, {
+            .metallib = NUMI_MATTER_METALLIB,
+            .captureEvents = true,
+            .captureDiagnostics = true,
+            .automaticIdentification = false,
+            .adaptiveTransfer = false,
+        });
+        require(initialized.encoded && runtime.valid(),
+            "Matter substep-mapping runtime failed to initialize: " +
+                initialized.message);
+        const auto baseline = runtime.snapshot();
+        require(baseline.available,
+            "Matter substep-mapping baseline is unavailable");
+
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        id<MTLCommandQueue> queue = [device newCommandQueue];
+        id<MTLBuffer> worldStatuses = [device
+            newBufferWithLength:sizeof(MRMetalWorldStatusGPU)
+            options:MTLResourceStorageModeShared];
+        id<MTLBuffer> mutations = [device
+            newBufferWithLength:sizeof(NMMutationCommandGPU)
+            options:MTLResourceStorageModeShared];
+        require(device != nil && queue != nil && worldStatuses != nil &&
+                mutations != nil,
+            "Matter substep-mapping buffers are unavailable");
+        auto* worldStatus = static_cast<MRMetalWorldStatusGPU*>(
+            worldStatuses.contents
+        );
+        *worldStatus = {};
+        worldStatus->code = MR_STEP_SUCCESS;
+        worldStatus->environment = 0u;
+        worldStatus->controlStep = 0u;
+        worldStatus->successfulSubsteps = kWorldSubstep;
+        worldStatus->abaCode = MR_ABA_SUCCESS;
+        worldStatus->failingSubstep = MR_INVALID_INDEX;
+        worldStatus->failingIndex = MR_INVALID_INDEX;
+        auto* mutation = static_cast<NMMutationCommandGPU*>(
+            mutations.contents
+        );
+        *mutation = {};
+        mutation->identity.x = NM_MUTATION_VERTEX_SMOOTH + 1u;
+        mutation->identity.y = 0u;
+        mutation->identity.z = 0x4d415050u;
+        mutation->identity.w = NM_MUTATION_ACTIVE;
+        mutation->schedule.x = 0u;
+        mutation->schedule.y = 0u;
+
+        id<MTLCommandBuffer> commandBuffer = [queue commandBuffer];
+        require(commandBuffer != nil,
+            "Matter substep-mapping command buffer is unavailable");
+        numi::matter::EncodeRequest request{};
+        request.commandBuffer = (__bridge void*)commandBuffer;
+        request.environmentStatuses = (__bridge void*)worldStatuses;
+        request.mutationCommands = (__bridge void*)mutations;
+        request.mutationCommandCount = 1u;
+        request.mutationCommandStride = sizeof(NMMutationCommandGPU);
+        request.controlStep = 0u;
+        request.physicsSubstep = 0u;
+        request.physicsSubsteps = 1u;
+        request.worldPhysicsSubstep = kWorldSubstep;
+        request.timestepSeconds = runtime.timestepSeconds();
+        request.phase = numi::matter::EncodePhase::preDynamics;
+        auto encoded = runtime.encode(request);
+        require(encoded.encoded,
+            "Matter substep-mapping pre-dynamics failed: " + encoded.message);
+        request.mutationCommands = nullptr;
+        request.mutationCommandCount = 0u;
+        request.mutationCommandStride = 0u;
+        request.phase = numi::matter::EncodePhase::postCommit;
+        encoded = runtime.encode(request);
+        require(encoded.encoded,
+            "Matter substep-mapping post-commit failed: " + encoded.message);
+        [commandBuffer commit];
+        [commandBuffer waitUntilCompleted];
+        require(commandBuffer.status == MTLCommandBufferStatusCompleted,
+            "Matter substep-mapping command buffer did not complete");
+
+        const auto rejected = runtime.snapshot();
+        require(rejected.available && rejected.statuses.size() == 1u,
+            "Matter substep-mapping failure snapshot is unavailable");
+        const NMMatterStatusGPU& matterStatus = rejected.statuses[0];
+        require(
+            matterStatus.code == NM_STATUS_TOPOLOGY_FAILURE &&
+                worldStatus->code == MR_STEP_UNSUPPORTED &&
+                worldStatus->successfulSubsteps == kWorldSubstep &&
+                worldStatus->failingSubstep == kWorldSubstep,
+            "Matter local substep overwrote the enclosing world coordinate"
+        );
+        const auto exactBytes = [](const auto& left, const auto& right) {
+            return left.size() == right.size() &&
+                (left.empty() || std::memcmp(
+                    left.data(), right.data(),
+                    left.size() * sizeof(left.front())) == 0);
+        };
+        require(
+            exactBytes(baseline.femNodes, rejected.femNodes) &&
+                exactBytes(
+                    baseline.femTopologyTetrahedra,
+                    rejected.femTopologyTetrahedra
+                ) &&
+                exactBytes(
+                    baseline.topologyStates,
+                    rejected.topologyStates
+                ),
+            "rejected Matter mutation did not restore the exact checkpoint"
+        );
+        std::cout
+            << "{\"schema\":\"numi.matter.world-substep.v1\""
+            << ",\"matter_status\":" << matterStatus.code
+            << ",\"matter_local_substep\":0"
+            << ",\"failing_world_substep\":"
+            << worldStatus->failingSubstep
+            << ",\"transaction_rollback\":true}\n";
+    }
+}
+
 void runMetalWorldCoupling() {
     @autoreleasepool {
         constexpr std::uint32_t controlSteps = 1u;
@@ -2857,6 +3132,8 @@ int main(int argc, const char* argv[]) {
             std::string_view(argv[1]) == "--mpm-batch";
         const bool mpmRollback = argc == 2 && std::string_view(argv[1]) == "--mpm-rollback";
         const bool metalWorldCoupling = argc == 2 && std::string_view(argv[1]) == "--metal-world-coupling";
+        const bool deviceFailureAccounting = argc == 2 &&
+            std::string_view(argv[1]) == "--device-failure-accounting";
         const bool multiphysics = argc == 2 && std::string_view(argv[1]) == "--multiphysics";
         const bool topologyMutation = argc == 2 &&
             std::string_view(argv[1]) == "--topology-mutation";
@@ -2896,7 +3173,8 @@ int main(int argc, const char* argv[]) {
             argc == 1 || mixedOnly || statefulMPM || statefulFEM ||
                 femOnly || mpmOnly || mpmFree || mpmSingle ||
                 mpmSingleContact || mpmGentle || mpmBatch || mpmRollback ||
-                metalWorldCoupling || multiphysics ||
+                metalWorldCoupling || deviceFailureAccounting ||
+                multiphysics ||
                 topologyMutation || topologyRollback || cohesiveMutation ||
                 smallScaleRemesh || punctureMutation ||
                 heterogeneousPunctureMutation || learnedMaterial ||
@@ -2907,7 +3185,7 @@ int main(int argc, const char* argv[]) {
                 adaptivePromotion || adaptivePromotionRollback || femFree ||
                 femHighRate || femHighDrop || heterogeneousFEM ||
                 heterogeneousMultiphysics,
-            "usage: metalrobo_matter_physics_probe [--poroelastic-compression|--articulated-foot-pad|--articulated-foot-pad-sequence|--mixed|--multiphysics|--topology-mutation|--topology-rollback|--cohesive-mutation|--small-scale-remesh|--puncture-mutation|--heterogeneous-puncture-mutation|--learned-material|--production-rollback|--stateful-mpm|--stateful-fem|--mpm|--mpm-free|--mpm-single|--mpm-single-contact|--mpm-gentle-contact|--mpm-batch|--mpm-rollback|--metal-world-coupling|--identification|--adaptive-demotion|--adaptive-promotion|--adaptive-promotion-rollback|--fem|--fem-free|--fem-high-rate|--fem-high-drop|--heterogeneous-fem|--heterogeneous-multiphysics]"
+            "usage: metalrobo_matter_physics_probe [--poroelastic-compression|--articulated-foot-pad|--articulated-foot-pad-sequence|--mixed|--multiphysics|--topology-mutation|--topology-rollback|--cohesive-mutation|--small-scale-remesh|--puncture-mutation|--heterogeneous-puncture-mutation|--learned-material|--production-rollback|--stateful-mpm|--stateful-fem|--mpm|--mpm-free|--mpm-single|--mpm-single-contact|--mpm-gentle-contact|--mpm-batch|--mpm-rollback|--metal-world-coupling|--device-failure-accounting|--identification|--adaptive-demotion|--adaptive-promotion|--adaptive-promotion-rollback|--fem|--fem-free|--fem-high-rate|--fem-high-drop|--heterogeneous-fem|--heterogeneous-multiphysics]"
         );
         if (articulatedFootPad) {
             runArticulatedFootPadScene();
@@ -2977,6 +3255,10 @@ int main(int argc, const char* argv[]) {
         }
         if (metalWorldCoupling) {
             runMetalWorldCoupling();
+        }
+        if (deviceFailureAccounting) {
+            runDeviceFailureAccounting();
+            runMatterWorldSubstepMapping();
         }
         if (multiphysics) {
             const auto outcome = runCase(
@@ -3393,6 +3675,7 @@ int main(int argc, const char* argv[]) {
         }
         if (!identification && !adaptiveDemotion && !adaptivePromotion &&
             !adaptivePromotionRollback && !metalWorldCoupling &&
+            !deviceFailureAccounting &&
             !multiphysics &&
             !topologyMutation && !topologyRollback && !cohesiveMutation &&
             !smallScaleRemesh && !punctureMutation &&
@@ -3458,6 +3741,7 @@ int main(int argc, const char* argv[]) {
         if (!mixedOnly && !statefulMPM && !statefulFEM &&
             !mpmOnly && !mpmFree && !mpmSingle && !mpmSingleContact &&
             !mpmGentle && !mpmBatch && !mpmRollback && !metalWorldCoupling &&
+            !deviceFailureAccounting &&
             !multiphysics &&
             !topologyMutation && !topologyRollback && !cohesiveMutation &&
             !smallScaleRemesh && !punctureMutation &&

@@ -1775,6 +1775,15 @@ RuntimeDiagnostics Runtime::encode(const EncodeRequest& request) {
             diagnostics.message = "matter physics-substep coordinates are invalid";
             return diagnostics;
         }
+        const std::uint32_t worldPhysicsSubstep =
+            request.worldPhysicsSubstep == NM_INVALID_INDEX
+            ? request.physicsSubstep
+            : request.worldPhysicsSubstep;
+        if (worldPhysicsSubstep >= MR_METAL_WORLD_MAX_PHYSICS_SUBSTEPS) {
+            diagnostics.message =
+                "enclosing MetalWorld physics-substep coordinate is invalid";
+            return diagnostics;
+        }
         if (state.requiresCurrentBodies &&
             request.rigid.currentBodies == nullptr) {
             diagnostics.message =
@@ -5037,8 +5046,8 @@ RuntimeDiagnostics Runtime::encode(const EncodeRequest& request) {
                 setDispatch();
                 [encoder setBuffer:state.statuses offset:0u atIndex:1u];
                 [encoder setBuffer:worldStatuses offset:0u atIndex:2u];
-                [encoder setBytes:&request.physicsSubstep
-                           length:sizeof(request.physicsSubstep)
+                [encoder setBytes:&worldPhysicsSubstep
+                           length:sizeof(worldPhysicsSubstep)
                           atIndex:3u];
             }
         );
