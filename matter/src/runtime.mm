@@ -2790,6 +2790,10 @@ RuntimeDiagnostics Runtime::encode(const EncodeRequest& request) {
                                atIndex:11u];
                     [encoder setBuffer:state.triggeredMutationCommands offset:0u
                                atIndex:12u];
+                    [encoder setBuffer:state.materials offset:0u atIndex:13u];
+                    [encoder setBuffer:state.mixedMaterials offset:0u
+                               atIndex:14u];
+                    [encoder setBuffer:state.schedulers offset:0u atIndex:15u];
                 });
                 const std::uint32_t triggeredMutationCount =
                     state.dispatch.objectCount;
@@ -4480,6 +4484,9 @@ RuntimeDiagnostics Runtime::encode(const EncodeRequest& request) {
                     [encoder setBuffer:state.contactHistoriesCandidate offset:0u atIndex:10u];
                     [encoder setBuffer:state.contactSamples offset:0u atIndex:11u];
                     [encoder setBuffer:state.triggeredMutationCommands offset:0u atIndex:12u];
+                    [encoder setBuffer:state.materials offset:0u atIndex:13u];
+                    [encoder setBuffer:state.mixedMaterials offset:0u atIndex:14u];
+                    [encoder setBuffer:state.schedulers offset:0u atIndex:15u];
                 });
                 const std::uint32_t triggeredMutationCount =
                     state.dispatch.objectCount;

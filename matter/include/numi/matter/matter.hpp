@@ -376,6 +376,11 @@ struct FieldBoundarySource {
 struct MutationPolicySource {
     bool enabled = false;
     bool cohesiveFracture = false;
+    // Use the puncture-tip contact material's cohesive strength as a traction
+    // threshold over a nodal dual surface area. The impulse value remains the
+    // nonzero enable gate and is still reported as evidence; invalid cohesive
+    // inputs fail closed rather than reverting to the legacy impulse rule.
+    bool cohesivePuncture = false;
     // Minimum accepted normal impulse required before device contact may
     // trigger puncture. Zero keeps automatic puncture disabled.
     double punctureImpulseThreshold = 0.0;

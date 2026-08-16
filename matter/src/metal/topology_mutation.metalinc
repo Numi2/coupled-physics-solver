@@ -343,6 +343,9 @@ kernel void nm_topology_detect_puncture(
     device const float4* acceptedHistories [[buffer(10)]],
     device const NMContactSampleGPU* contactSamples [[buffer(11)]],
     device NMMutationCommandGPU* commands [[buffer(12)]],
+    device const NMMaterialGPU* materials [[buffer(13)]],
+    device const NMMixedMaterialGPU* mixedMaterials [[buffer(14)]],
+    device const NMSchedulerStateGPU* schedulers [[buffer(15)]],
     uint global [[thread_position_in_grid]]
 ) {
     const uint count = dispatch.environmentCount * dispatch.objectCount;
@@ -356,8 +359,11 @@ kernel void nm_topology_detect_puncture(
     if (object.representation != NM_REPRESENTATION_FEM ||
         (object.flags & NM_OBJECT_MUTABLE_TOPOLOGY) == 0u ||
         capacities[objectIndex].topology.w == 0u) return;
-    const float punctureImpulseThreshold =
-        as_type<float>(capacities[objectIndex].work.w);
+    const uint packedPuncturePolicy = capacities[objectIndex].work.w;
+    const float punctureImpulseThreshold = as_type<float>(
+        packedPuncturePolicy & NM_FEM_PUNCTURE_THRESHOLD_MASK);
+    const bool cohesiveTraction = (packedPuncturePolicy &
+        NM_FEM_PUNCTURE_COHESIVE_TRACTION) != 0u;
     if (!(punctureImpulseThreshold > 0.0f) ||
         !isfinite(punctureImpulseThreshold)) return;
 
@@ -547,6 +553,7 @@ kernel void nm_topology_detect_puncture(
         NMContactSampleGPU acceptedSample{};
         float acceptedNormalImpulse = 0.0f;
         float currentNormalImpulse = 0.0f;
+        float tipLocalDualArea = 0.0f;
         float representativeImpulse = -1.0f;
         const uint pairBase = environment * dispatch.contactPairCount;
         for (uint pairIndex = 0u; pairIndex < dispatch.contactPairCount;
@@ -582,16 +589,65 @@ kernel void nm_topology_detect_puncture(
                     sample.impulseAndNormal.w < 0.0f) continue;
                 acceptedNormalImpulse += historyImpulse;
                 currentNormalImpulse += sample.impulseAndNormal.w;
+                if (cohesiveTraction &&
+                    pair.continuumNode >= dispatch.gridNodeCount) {
+                    const uint femNode =
+                        pair.continuumNode - dispatch.gridNodeCount;
+                    if (femNode < dispatch.femNodeCount &&
+                        proxies[proxyIndex].materialIndex <
+                            dispatch.materialCount) {
+                        const float inverseMass = nodes[
+                            nodeBase + femNode
+                        ].velocityAndInverseMass.w;
+                        const float density = materials[
+                            proxies[proxyIndex].materialIndex
+                        ].bulk.x;
+                        const float surfaceDepth = object.fidelity.x;
+                        if (inverseMass > 0.0f && density > 0.0f &&
+                            surfaceDepth > 0.0f) {
+                            tipLocalDualArea += 1.0f /
+                                (inverseMass * density * surfaceDepth);
+                        }
+                    }
+                }
                 if (sample.impulseAndNormal.w > representativeImpulse) {
                     representativeImpulse = sample.impulseAndNormal.w;
                     acceptedSample = sample;
                 }
             }
         }
-        acceptedContact =
-            acceptedNormalImpulse >= punctureImpulseThreshold &&
-            currentNormalImpulse >= punctureImpulseThreshold &&
-            representativeImpulse >= 0.0f;
+        if (cohesiveTraction) {
+            // Explicit cohesive admission fails closed. A missing/invalid
+            // interface material, nodal area or timestep must never restore
+            // the mesh-dependent legacy impulse rule.
+            if (proxies[proxyIndex].materialIndex <
+                    dispatch.mixedMaterialCount &&
+                tipLocalDualArea > 0.0f) {
+                const float cohesiveStrength = mixedMaterials[
+                    proxies[proxyIndex].materialIndex
+                ].coupling.z;
+                const NMSchedulerStateGPU scheduler = schedulers[
+                    environment * dispatch.objectCount + objectIndex
+                ];
+                const float dt = objectTimestep(dispatch, scheduler);
+                const float impulseAreaTime = tipLocalDualArea * dt;
+                const float acceptedTraction = acceptedNormalImpulse /
+                    max(impulseAreaTime, 1.0e-30f);
+                const float currentTraction = currentNormalImpulse /
+                    max(impulseAreaTime, 1.0e-30f);
+                acceptedContact = cohesiveStrength > 0.0f &&
+                    isfinite(cohesiveStrength) &&
+                    dt > 0.0f && isfinite(dt) &&
+                    acceptedTraction >= cohesiveStrength &&
+                    currentTraction >= cohesiveStrength &&
+                    representativeImpulse >= 0.0f;
+            }
+        } else {
+            acceptedContact =
+                acceptedNormalImpulse >= punctureImpulseThreshold &&
+                currentNormalImpulse >= punctureImpulseThreshold &&
+                representativeImpulse >= 0.0f;
+        }
         if (!acceptedContact) continue;
 
         const float3 contactNormal = acceptedSample.normalAndVelocity.xyz;

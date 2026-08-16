@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -781,12 +782,141 @@ void verifyLearnedMaterialRoundTrip() {
     );
 }
 
+void verifyCohesivePuncturePolicyRoundTrip() {
+    const auto parsed = numi::matter::parseMatterFile(
+        NUMI_MATTER_STATEFUL_MATERIAL
+    );
+    require(parsed.succeeded(), "cohesive puncture material did not parse");
+
+    numi::matter::WorldSource source;
+    source.frameTimestep = 1.0 / 16000.0;
+    source.gravity = {0.0, 0.0, 0.0};
+    source.materials.push_back(parsed.material);
+    source.materials[0].mixed.cohesiveStrength = 12000.0;
+
+    numi::matter::RigidProxySource tip;
+    tip.shape = NM_RIGID_CAPSULE;
+    tip.bodyIndex = 0u;
+    tip.materialIndex = 0u;
+    tip.localCenter = {0.0, 0.0, 0.012};
+    tip.localExtent = {0.0, 0.0, 0.010};
+    tip.radiusOrOffset = 5.0e-5;
+    tip.punctureTip = true;
+    source.rigidProxies.push_back(tip);
+
+    numi::matter::ObjectSource tissue;
+    tissue.name = "cohesive_puncture_policy";
+    tissue.materialIndex = 0u;
+    tissue.representation = numi::matter::Representation::fem;
+    tissue.selfContact = false;
+    tissue.characteristicLength = 0.01;
+    tissue.femNodes = {
+        {-0.005, -0.005, 0.0},
+        { 0.005, -0.005, 0.0},
+        {-0.005,  0.005, 0.0},
+        {-0.005, -0.005, 0.01},
+    };
+    tissue.femContactNodes = {0u, 1u, 2u, 3u};
+    tissue.tetrahedra.push_back({{0u, 1u, 2u, 3u}});
+    tissue.mutationPolicy.enabled = true;
+    tissue.mutationPolicy.cohesivePuncture = true;
+    tissue.mutationPolicy.punctureImpulseThreshold = 5.0e-7;
+    tissue.femCapacity.punctureChannels = 4u;
+    source.objects.push_back(tissue);
+
+    const auto compiled = numi::matter::compileWorld(source);
+    std::string compileMessage = "cohesive puncture policy did not compile";
+    for (const auto& diagnostic : compiled.diagnostics) {
+        compileMessage += ": " + diagnostic.message;
+    }
+    require(compiled.succeeded(), compileMessage);
+    require(
+        compiled.world.fem.capacities.size() == 1u,
+        "cohesive puncture policy lost its FEM capacity"
+    );
+    const std::uint32_t packed = compiled.world.fem.capacities[0].work.w;
+    require(
+        (packed & NM_FEM_PUNCTURE_COHESIVE_TRACTION) != 0u &&
+            std::bit_cast<float>(
+                packed & NM_FEM_PUNCTURE_THRESHOLD_MASK
+            ) == static_cast<float>(
+                tissue.mutationPolicy.punctureImpulseThreshold
+            ),
+        "cohesive puncture policy changed its packed ABI meaning"
+    );
+
+    const auto package = std::filesystem::temp_directory_path() /
+        ("numi-matter-cohesive-puncture-" +
+         std::to_string(compiled.world.fingerprint) + ".nmatterpack");
+    std::string error;
+    require(
+        numi::matter::writePackage(compiled, package, &error),
+        "cohesive puncture package write failed"
+    );
+    numi::matter::CompiledWorld roundTrip;
+    std::string generated;
+    require(
+        numi::matter::readPackage(
+            package, roundTrip, &generated, &error
+        ),
+        "cohesive puncture package readback failed"
+    );
+    std::error_code removeError;
+    std::filesystem::remove(package, removeError);
+    require(
+        roundTrip.fingerprint == compiled.world.fingerprint &&
+            roundTrip.fem.capacities[0].work.w == packed,
+        "cohesive puncture package changed the packed policy"
+    );
+
+    auto invalidSource = source;
+    invalidSource.materials[0].mixed.cohesiveStrength = 0.0;
+    const auto rejected = numi::matter::compileWorld(invalidSource);
+    require(
+        !rejected.succeeded() && std::ranges::any_of(
+            rejected.diagnostics,
+            [](const numi::matter::Diagnostic& diagnostic) {
+                return diagnostic.message.find(
+                    "cohesive puncture requires"
+                ) != std::string::npos;
+            }
+        ),
+        "compiler accepted cohesive puncture without cohesive strength"
+    );
+
+    auto negativeZeroSource = source;
+    negativeZeroSource.objects[0].mutationPolicy.cohesivePuncture = false;
+    negativeZeroSource.objects[0].mutationPolicy.punctureImpulseThreshold =
+        -0.0;
+    const auto normalized = numi::matter::compileWorld(negativeZeroSource);
+    require(
+        normalized.succeeded() &&
+            normalized.world.fem.capacities[0].work.w == 0u,
+        "compiler aliased a signed-zero threshold with the cohesive flag"
+    );
+
+    auto corrupted = roundTrip;
+    corrupted.fem.capacities[0].work.w =
+        NM_FEM_PUNCTURE_COHESIVE_TRACTION;
+    corrupted.fingerprint =
+        numi::matter::compiledWorldFingerprint(corrupted);
+    std::string validationError;
+    require(
+        !numi::matter::validateCompiledWorldLayout(
+            corrupted, &validationError
+        ) && validationError.find("cohesive puncture policy") !=
+            std::string::npos,
+        "layout validator accepted a zero-threshold cohesive policy"
+    );
+}
+
 } // namespace
 
 int main() {
     try {
         verifyAdaptiveLayout();
         verifyLearnedMaterialRoundTrip();
+        verifyCohesivePuncturePolicyRoundTrip();
         const auto world = compileStatefulWorld();
         std::cout
             << "{\"schema\":\"numi.matter.stateful-compiler.v1\""

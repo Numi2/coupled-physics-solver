@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -287,8 +288,52 @@ private:
                 return failIndexed("mixed material", index, "coefficients are invalid");
             }
         }
-        for (const NMFEMCapacityGPU capacity : world_.fem.capacities) {
+        for (std::size_t index = 0u;
+             index < world_.fem.capacities.size(); ++index) {
+            const NMFEMCapacityGPU capacity = world_.fem.capacities[index];
             tetrahedronCapacity += capacity.topology.y;
+            const std::uint32_t packedPuncturePolicy = capacity.work.w;
+            const float punctureImpulseThreshold = std::bit_cast<float>(
+                packedPuncturePolicy & NM_FEM_PUNCTURE_THRESHOLD_MASK
+            );
+            const bool cohesivePuncture =
+                (packedPuncturePolicy &
+                 NM_FEM_PUNCTURE_COHESIVE_TRACTION) != 0u;
+            if (!std::isfinite(punctureImpulseThreshold) ||
+                punctureImpulseThreshold < 0.0f) {
+                return failIndexed(
+                    "FEM capacity", index,
+                    "puncture policy has an invalid enable threshold"
+                );
+            }
+            if (cohesivePuncture) {
+                const NMContinuumObjectGPU& object = world_.objects[index];
+                const bool hasQualifiedTip = std::ranges::any_of(
+                    world_.contact.rigidProxies,
+                    [&](const NMRigidProxyGPU& proxy) {
+                        return
+                            (proxy.flags & NM_RIGID_PUNCTURE_TIP) != 0u &&
+                            proxy.materialIndex <
+                                world_.mixedMaterials.size() &&
+                            world_.mixedMaterials[proxy.materialIndex]
+                                    .coupling.z > 0.0f &&
+                            std::isfinite(
+                                world_.mixedMaterials[proxy.materialIndex]
+                                    .coupling.z
+                            );
+                    }
+                );
+                if (object.representation != NM_REPRESENTATION_FEM ||
+                    (object.flags & NM_OBJECT_MUTABLE_TOPOLOGY) == 0u ||
+                    !(punctureImpulseThreshold > 0.0f) ||
+                    !hasQualifiedTip) {
+                    return failIndexed(
+                        "FEM capacity", index,
+                        "cohesive puncture policy lacks mutable topology, "
+                        "enable threshold, or qualified tip"
+                    );
+                }
+            }
         }
         if (tetrahedronCapacity != world_.dispatch.topologyTetrahedronCapacity) {
             return fail("topology tetrahedron capacity disagrees with dispatch");

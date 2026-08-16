@@ -39,7 +39,7 @@ typedef struct NM_ALIGN16 nm_int4 {
 } nm_int4;
 #endif
 
-#define NM_MATTER_ABI_VERSION 24u
+#define NM_MATTER_ABI_VERSION 25u
 #define NM_INVALID_INDEX 0xffffffffu
 #define NM_EXPRESSION_STACK_CAPACITY 96u
 #define NM_MPM_STENCIL_WIDTH 27u
@@ -208,6 +208,15 @@ enum NMMutationFlags : nm_u32 {
     NM_MUTATION_PHYSICS_TRIGGERED = 1u << 1u,
 };
 
+enum NMFEMPuncturePolicyFlags : nm_u32 {
+    // Interpret puncture admission through the contact material's cohesive
+    // strength and a nodal dual surface area instead of a mesh-dependent raw
+    // nodal impulse. The remaining bits retain the enable/legacy impulse
+    // threshold; cohesive mode never falls back to it for admission.
+    NM_FEM_PUNCTURE_COHESIVE_TRACTION = 1u << 31u,
+    NM_FEM_PUNCTURE_THRESHOLD_MASK = 0x7fffffffu,
+};
+
 enum NMTopologyFlags : nm_u32 {
     NM_TOPOLOGY_ACTIVE = 1u << 0u,
     NM_TOPOLOGY_SURFACE = 1u << 1u,
@@ -358,7 +367,7 @@ typedef struct NM_ALIGN16 NMFEMCapacityGPU {
     // node capacity, tetrahedron capacity, cohesive-face capacity, channel capacity.
     nm_uint4 topology;
     // mutation-command capacity, incidence capacity, contact capacity,
-    // puncture impulse threshold encoded as IEEE-754 float bits.
+    // packed puncture policy flag and positive impulse-threshold float bits.
     nm_uint4 work;
 } NMFEMCapacityGPU;
 

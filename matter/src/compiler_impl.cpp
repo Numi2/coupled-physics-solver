@@ -982,6 +982,12 @@ CompileResult compileWorld(
             return result;
         }
         const ObjectSource& object = source.objects[objectIndexSize];
+        const float cookedPunctureImpulseThreshold =
+            object.mutationPolicy.punctureImpulseThreshold == 0.0
+            ? 0.0f
+            : static_cast<float>(
+                object.mutationPolicy.punctureImpulseThreshold
+            );
         if (object.materialIndex >= source.materials.size() ||
             object.name.empty() ||
             !(object.characteristicLength > 0.0) ||
@@ -989,7 +995,9 @@ CompileResult compileWorld(
             !std::isfinite(object.mutationPolicy.punctureImpulseThreshold) ||
             object.mutationPolicy.punctureImpulseThreshold < 0.0 ||
             object.mutationPolicy.punctureImpulseThreshold >
-                std::numeric_limits<float>::max()) {
+                std::numeric_limits<float>::max() ||
+            (object.mutationPolicy.punctureImpulseThreshold > 0.0 &&
+             !(cookedPunctureImpulseThreshold > 0.0f))) {
             result.diagnostics.push_back({
                 Diagnostic::Severity::error, 0u, 0u,
                 "continuum object has invalid name, material, or characteristic length",
@@ -1000,6 +1008,33 @@ CompileResult compileWorld(
         const Representation representation = selectRepresentation(
             object, material, result.diagnostics
         );
+        if (object.mutationPolicy.cohesivePuncture) {
+            const bool hasQualifiedTip = std::ranges::any_of(
+                source.rigidProxies,
+                [&](const RigidProxySource& proxy) {
+                    return proxy.punctureTip &&
+                        proxy.materialIndex < source.materials.size() &&
+                        source.materials[proxy.materialIndex]
+                                .mixed.cohesiveStrength > 0.0 &&
+                        std::isfinite(
+                            source.materials[proxy.materialIndex]
+                                .mixed.cohesiveStrength
+                        );
+                }
+            );
+            if (representation != Representation::fem ||
+                !object.mutationPolicy.enabled ||
+                !(object.mutationPolicy.punctureImpulseThreshold > 0.0) ||
+                !hasQualifiedTip) {
+                result.diagnostics.push_back({
+                    Diagnostic::Severity::error, 0u, 0u,
+                    "cohesive puncture requires mutable FEM, a positive enable "
+                    "threshold, and a sharp tip with positive "
+                    "interface cohesive strength",
+                });
+                continue;
+            }
+        }
         const bool heterogeneousFEM =
             representation == Representation::fem &&
             std::ranges::any_of(
@@ -2002,9 +2037,9 @@ CompileResult compileWorld(
                 static_cast<nm_u32>(mutationCapacity),
                 static_cast<nm_u32>(nodeCapacity * 4u),
                 static_cast<nm_u32>(activeContactCapacity),
-                std::bit_cast<nm_u32>(static_cast<float>(
-                    object.mutationPolicy.punctureImpulseThreshold
-                )),
+                std::bit_cast<nm_u32>(cookedPunctureImpulseThreshold) |
+                    (object.mutationPolicy.cohesivePuncture
+                        ? NM_FEM_PUNCTURE_COHESIVE_TRACTION : 0u),
             };
         }
 

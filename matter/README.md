@@ -90,6 +90,26 @@ The FEM path uses linear tetrahedral kinematics with nonlinear constitutive stre
 
 IPC's squared-distance logarithmic potential contributes primal gradients and PSD Hessian actions; per-node timestep ratios apply the action chain rule to cross-rate FEM/MPM rows. There are no contact multiplier unknowns, response CSR, Delassus rows, or post-contact correction solves. Element work is parallel and node assembly uses rebuilt incidence. FGMRES uses compensated SIMD32 reductions, modified Gram-Schmidt with selective reorthogonalization, device Givens rotations, restart cycles and an inexact-Newton forcing schedule. The environment-owned SIMD32 Arnoldi wave continues directly from orthogonalization into its norm, Givens update and next-basis publication. Restart-residual reconstruction and the tiny triangular solve likewise share one per-environment cycle-finalization dispatch, and the final cycle does not materialize coefficients that no later cycle can consume. These fusions retain the original reduction and arithmetic order while removing command traffic. The right preconditioner combines FEM node-star diagonals, overlapping tetrahedron patches, MPM lumped/particle-patch/object modes, field smoothing, and rigid inverse-mass action. FGMRES remains the sole convergence owner. One environment-wide line search combines constitutive determinant and mixed-volume bounds with conservative CCD, barrier fraction-to-boundary caps, and barrier Armijo backtracking.
 
+ABI v25 adds an explicit cohesive-traction policy for sharp-tip puncture
+admission. The policy retains a positive impulse value only as an enable gate,
+then converts the deterministic sum of aligned tip-contact impulses to normal
+traction using the scheduled object timestep and the contacted nodes' dual
+surface-area estimate
+
+```text
+A_tip = sum_i m_i / (rho_interface * h_object)
+traction_tip = sum_i impulse_i / (A_tip * dt_object).
+```
+
+Both accepted-history and current-candidate traction must reach the puncture
+interface material's positive `cohesiveStrength`. Missing material, area, or
+timestep data fails closed and cannot restore the legacy raw-impulse rule. The
+compiler, package loader, and runtime share validation of the packed flag and
+threshold. This policy removes raw per-node impulse as the first-fracture
+authority, but it does not yet spend `fractureEnergy` during channel growth:
+post-admission propagation remains the bounded embedded-channel construction
+described below and requires experimental calibration before fidelity claims.
+
 ABI v24 records the authored FGMRES restart depth as the compact per-world
 matrix/vector stride. Accuracy-focused worlds may retain up to four SIMD32
 Arnoldi panels, while ordinary batched worlds allocate and clear only their
@@ -315,7 +335,7 @@ The portable compiler and package code is built with:
 -std=c++23 -Wall -Wextra -Wpedantic -Werror
 ```
 
-The included elastic and damageable-viscoelastic materials compile into worlds containing both MPM and FEM objects, write versioned packages, emit specialized Metal and round-trip through `readPackage`. The portable stateful regression evaluates compiled elastic stress degradation, viscous stress/tangent, explicit state evolution and canonical fingerprint sensitivity. It also corrupts material-state offsets, scalar-program spans, sparse block lookup, tetrahedron topology, contact incidence and identification ownership and requires a precise rejection from the same validator used by production loading. Source-level audits additionally check shared-ABI sizes, kernel names, buffer bindings and delimiter balance.
+The included elastic and damageable-viscoelastic materials compile into worlds containing both MPM and FEM objects, write versioned packages, emit specialized Metal and round-trip through `readPackage`. The portable stateful regression evaluates compiled elastic stress degradation, viscous stress/tangent, explicit state evolution and canonical fingerprint sensitivity. It also round-trips the cohesive puncture policy, rejects a missing interface strength and corrupts its packed enable threshold, alongside corruptions of material-state offsets, scalar-program spans, sparse block lookup, tetrahedron topology, contact incidence and identification ownership. Every case requires a precise rejection from the same validator used by production loading. Source-level audits additionally check shared-ABI sizes, kernel names, buffer bindings and delimiter balance.
 
 On an Apple Silicon Metal 4 build host, run the physics qualification suite
 after building the probe target:
