@@ -753,6 +753,14 @@ struct RuntimeDiagnostics {
     std::string message;
 };
 
+// Invocation-time work ceilings. These may change only at a completed
+// command-buffer boundary; tolerances, restart depth, world state, and the
+// compiled physics identity remain unchanged.
+struct SolverIterationBudgets {
+    std::uint32_t newtonIterations = 0u;
+    std::uint32_t fgmresIterations = 0u;
+};
+
 struct TopologyGrowthRequest {
     bool required = false;
     std::uint32_t allocationGeneration = 0u;
@@ -878,6 +886,14 @@ public:
     ) noexcept;
     [[nodiscard]] std::uint32_t coupledTimestepMultiplier() const noexcept;
     [[nodiscard]] float timestepSeconds() const noexcept;
+    // Retunes only the statically encoded Newton/FGMRES work ceiling. This is
+    // intended for deterministic retry after a rejected transaction, without
+    // paying the larger command graph on ordinary steps. FGMRES restart depth
+    // and every physical acceptance tolerance remain authored constants.
+    [[nodiscard]] bool setSolverIterationBudgets(
+        SolverIterationBudgets budgets
+    ) noexcept;
+    [[nodiscard]] SolverIterationBudgets solverIterationBudgets() const noexcept;
     [[nodiscard]] RuntimeStateSnapshot snapshot() const;
     [[nodiscard]] void* eventBuffer() const noexcept;
     [[nodiscard]] void* statusBuffer() const noexcept;

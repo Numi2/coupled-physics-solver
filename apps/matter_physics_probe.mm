@@ -1284,6 +1284,87 @@ void runStatefulMaterial(
     }
 }
 
+void checkSolverBudgetOverride() {
+    @autoreleasepool {
+        const auto world = compileCase(
+            numi::matter::Representation::fem,
+            false
+        );
+        numi::matter::Runtime runtime;
+        const auto initialized = runtime.initialize(
+            world,
+            {
+                .metallib = NUMI_MATTER_METALLIB,
+                .environmentCount = 1u,
+                .captureEvents = false,
+                .captureDiagnostics = false,
+                .automaticIdentification = false,
+                .adaptiveTransfer = false,
+            }
+        );
+        require(initialized.encoded && runtime.valid(), initialized.message);
+        const auto authored = runtime.solverIterationBudgets();
+        require(
+            authored.newtonIterations ==
+                    world.mixedSolver.nonlinearIterations.x &&
+                authored.fgmresIterations ==
+                    world.mixedSolver.nonlinearIterations.z,
+            "runtime did not retain the authored solver budgets"
+        );
+        const auto expanded = numi::matter::SolverIterationBudgets{
+            .newtonIterations = authored.newtonIterations + 1u,
+            .fgmresIterations = authored.fgmresIterations +
+                world.mixedSolver.nonlinearIterations.y,
+        };
+        const std::uint64_t programFingerprint =
+            runtime.deviceProgramFingerprint();
+        require(
+            !runtime.setSolverIterationBudgets({}),
+            "runtime accepted zero solver budgets"
+        );
+        require(
+            !runtime.setSolverIterationBudgets({
+                .newtonIterations = authored.newtonIterations,
+                .fgmresIterations =
+                    world.mixedSolver.nonlinearIterations.y - 1u,
+            }),
+            "runtime accepted an FGMRES budget below its restart depth"
+        );
+        require(
+            runtime.setSolverIterationBudgets(expanded) &&
+                runtime.solverIterationBudgets().newtonIterations ==
+                    expanded.newtonIterations &&
+                runtime.solverIterationBudgets().fgmresIterations ==
+                    expanded.fgmresIterations,
+            "runtime did not publish expanded solver budgets"
+        );
+        require(
+            runtime.deviceProgramFingerprint() == programFingerprint,
+            "solver work ceilings changed the immutable device program"
+        );
+        require(
+            runtime.setSolverIterationBudgets(authored) &&
+                runtime.solverIterationBudgets().newtonIterations ==
+                    authored.newtonIterations &&
+                runtime.solverIterationBudgets().fgmresIterations ==
+                    authored.fgmresIterations,
+            "runtime did not restore the authored solver budgets"
+        );
+        std::cout
+            << "{\"schema\":\"numi.matter.solver-budget-override.v1\""
+            << ",\"authored_newton_iterations\":"
+            << authored.newtonIterations
+            << ",\"authored_fgmres_iterations\":"
+            << authored.fgmresIterations
+            << ",\"expanded_newton_iterations\":"
+            << expanded.newtonIterations
+            << ",\"expanded_fgmres_iterations\":"
+            << expanded.fgmresIterations
+            << ",\"tolerances_changed\":false"
+            << ",\"program_fingerprint_changed\":false}\n";
+    }
+}
+
 struct Outcome {
     double gpuMilliseconds = 0.0;
     std::size_t residentBytes = 0u;
@@ -3134,6 +3215,8 @@ int main(int argc, const char* argv[]) {
         const bool metalWorldCoupling = argc == 2 && std::string_view(argv[1]) == "--metal-world-coupling";
         const bool deviceFailureAccounting = argc == 2 &&
             std::string_view(argv[1]) == "--device-failure-accounting";
+        const bool solverBudgetOverride = argc == 2 &&
+            std::string_view(argv[1]) == "--solver-budget-override";
         const bool multiphysics = argc == 2 && std::string_view(argv[1]) == "--multiphysics";
         const bool topologyMutation = argc == 2 &&
             std::string_view(argv[1]) == "--topology-mutation";
@@ -3174,6 +3257,7 @@ int main(int argc, const char* argv[]) {
                 femOnly || mpmOnly || mpmFree || mpmSingle ||
                 mpmSingleContact || mpmGentle || mpmBatch || mpmRollback ||
                 metalWorldCoupling || deviceFailureAccounting ||
+                solverBudgetOverride ||
                 multiphysics ||
                 topologyMutation || topologyRollback || cohesiveMutation ||
                 smallScaleRemesh || punctureMutation ||
@@ -3185,8 +3269,12 @@ int main(int argc, const char* argv[]) {
                 adaptivePromotion || adaptivePromotionRollback || femFree ||
                 femHighRate || femHighDrop || heterogeneousFEM ||
                 heterogeneousMultiphysics,
-            "usage: metalrobo_matter_physics_probe [--poroelastic-compression|--articulated-foot-pad|--articulated-foot-pad-sequence|--mixed|--multiphysics|--topology-mutation|--topology-rollback|--cohesive-mutation|--small-scale-remesh|--puncture-mutation|--heterogeneous-puncture-mutation|--learned-material|--production-rollback|--stateful-mpm|--stateful-fem|--mpm|--mpm-free|--mpm-single|--mpm-single-contact|--mpm-gentle-contact|--mpm-batch|--mpm-rollback|--metal-world-coupling|--device-failure-accounting|--identification|--adaptive-demotion|--adaptive-promotion|--adaptive-promotion-rollback|--fem|--fem-free|--fem-high-rate|--fem-high-drop|--heterogeneous-fem|--heterogeneous-multiphysics]"
+            "usage: metalrobo_matter_physics_probe [--poroelastic-compression|--articulated-foot-pad|--articulated-foot-pad-sequence|--mixed|--multiphysics|--topology-mutation|--topology-rollback|--cohesive-mutation|--small-scale-remesh|--puncture-mutation|--heterogeneous-puncture-mutation|--learned-material|--production-rollback|--stateful-mpm|--stateful-fem|--mpm|--mpm-free|--mpm-single|--mpm-single-contact|--mpm-gentle-contact|--mpm-batch|--mpm-rollback|--metal-world-coupling|--device-failure-accounting|--solver-budget-override|--identification|--adaptive-demotion|--adaptive-promotion|--adaptive-promotion-rollback|--fem|--fem-free|--fem-high-rate|--fem-high-drop|--heterogeneous-fem|--heterogeneous-multiphysics]"
         );
+        if (solverBudgetOverride) {
+            checkSolverBudgetOverride();
+            return 0;
+        }
         if (articulatedFootPad) {
             runArticulatedFootPadScene();
         }

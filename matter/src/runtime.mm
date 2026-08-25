@@ -5836,6 +5836,53 @@ float Runtime::timestepSeconds() const noexcept {
         : 0.0f;
 }
 
+bool Runtime::setSolverIterationBudgets(
+    const SolverIterationBudgets budgets
+) noexcept {
+    if (state_ == nullptr || budgets.newtonIterations == 0u ||
+        budgets.newtonIterations > 64u ||
+        budgets.fgmresIterations <
+            state_->mixedSolverValue.nonlinearIterations.y ||
+        budgets.fgmresIterations > 4u * NM_MIXED_FGMRES_RESTART) {
+        return false;
+    }
+    try {
+        const auto ownership = state_->commandOwnership;
+        const std::lock_guard lock(ownership->mutex);
+        if (ownership->activeCommandBuffer != nullptr ||
+            ownership->preDynamicsOpen) {
+            return false;
+        }
+        // x/z are host command-graph loop ceilings. The immutable restart
+        // depth in y and line-search count in w remain in the uploaded solver
+        // block consumed by Metal. Updating only x/z therefore requires no
+        // device write or synchronization and cannot alter physical gates.
+        state_->mixedSolverValue.nonlinearIterations.x =
+            budgets.newtonIterations;
+        state_->mixedSolverValue.nonlinearIterations.z =
+            budgets.fgmresIterations;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+SolverIterationBudgets Runtime::solverIterationBudgets() const noexcept {
+    if (state_ == nullptr) return {};
+    try {
+        const auto ownership = state_->commandOwnership;
+        const std::lock_guard lock(ownership->mutex);
+        return {
+            .newtonIterations =
+                state_->mixedSolverValue.nonlinearIterations.x,
+            .fgmresIterations =
+                state_->mixedSolverValue.nonlinearIterations.z,
+        };
+    } catch (...) {
+        return {};
+    }
+}
+
 RuntimeStateSnapshot Runtime::snapshot() const {
     RuntimeStateSnapshot snapshot;
     if (state_ == nullptr) {
