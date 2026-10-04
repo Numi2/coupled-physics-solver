@@ -253,6 +253,9 @@ kernel void nm_fgmres_begin(
     constant uint& nonlinearIteration [[buffer(16)]],
     device const NMFEMNodeStateGPU* candidateNodes [[buffer(17)]],
     device const float* rigidCandidate [[buffer(18)]],
+    device const NMTetrahedronGPU* tetrahedra [[buffer(19)]],
+    device const NMFEMFieldStateGPU* candidateFields [[buffer(20)]],
+    device const NMMixedMaterialGPU* mixedMaterials [[buffer(21)]],
     uint lane [[thread_index_in_threadgroup]],
     uint group [[threadgroup_position_in_grid]]
 ) {
@@ -314,6 +317,66 @@ kernel void nm_fgmres_begin(
     }
     norm2 = simd_sum(norm2);
     maximumCandidateSpeedSquared = simd_max(maximumCandidateSpeedSquared);
+    // Publication certifies the raw per-object incompressibility RMS in
+    // addition to the equilibrated KKT norm.  Measure that same physical
+    // residual before declaring an early nonlinear exit; otherwise pressure
+    // row scaling can make the KKT norm pass one Newton iteration before the
+    // volume certificate and leave the statically encoded Newton tail empty.
+    float maximumVolumeResidual = 0.0f;
+    if (active) {
+        const uint nodeBase = environment * dispatch.femNodeCount;
+        for (uint objectIndex = 0u;
+             objectIndex < dispatch.objectCount; ++objectIndex) {
+            const NMContinuumObjectGPU object = objects[objectIndex];
+            if (object.representation != NM_REPRESENTATION_FEM ||
+                (object.flags & NM_OBJECT_MIXED_FEM) == 0u) continue;
+            float volumeNorm2 = 0.0f;
+            uint activeElements = 0u;
+            for (uint local = lane; local < object.elementCount;
+                 local += 32u) {
+                const uint tetIndex = object.elementOffset + local;
+                if (tetIndex >= dispatch.tetrahedronCount) continue;
+                const NMTetrahedronGPU tet = environmentTetrahedron(
+                    dispatch, tetrahedra, environment, tetIndex
+                );
+                if ((tet.identity.w & NM_OBJECT_ACTIVE) == 0u ||
+                    tet.identity.x >= dispatch.mixedMaterialCount) continue;
+                const float j = determinant(tetrahedronDeformation(
+                    tet, candidateNodes, nodeBase
+                ));
+                if (!(j > dispatch.numericalLimits.z)) {
+                    volumeNorm2 = INFINITY;
+                    ++activeElements;
+                    continue;
+                }
+                const NMMixedMaterialGPU material =
+                    mixedMaterials[tet.identity.x];
+                float temperature = 0.0f;
+                float pressure = 0.0f;
+                for (uint slot = 0u; slot < 4u; ++slot) {
+                    const NMFEMFieldStateGPU field = candidateFields[
+                        nodeBase + tet.nodes[slot]];
+                    temperature += field.primary.y;
+                    pressure += field.primary.x;
+                }
+                temperature *= 0.25f;
+                pressure *= 0.25f;
+                const float constraint = log(j) + pressure / max(
+                    material.mechanics.x, solver.regularization.x
+                ) - 3.0f * material.mechanics.y *
+                    (temperature - material.mechanics.w);
+                volumeNorm2 += constraint * constraint;
+                ++activeElements;
+            }
+            volumeNorm2 = simd_sum(volumeNorm2);
+            activeElements = simd_sum(activeElements);
+            const float volumeResidual = activeElements > 0u
+                ? sqrt(max(volumeNorm2 / float(activeElements), 0.0f))
+                : 0.0f;
+            maximumVolumeResidual = max(
+                maximumVolumeResidual, volumeResidual);
+        }
+    }
     const uint restart = dispatch.fgmresRestartStride;
     for (uint index = lane; index <
          (restart + 1u) * restart;
@@ -349,7 +412,9 @@ kernel void nm_fgmres_begin(
         all(dispatch.gravityAndTimestep.xyz == float3(0.0f));
     const bool nonlinearConverged = restartCycle == 0u &&
         (correctionFinite || contactFreeStaticRest) &&
-        norm <= nonlinearThreshold;
+        norm <= nonlinearThreshold &&
+        isfinite(maximumVolumeResidual) &&
+        maximumVolumeResidual <= solver.residualTolerances.y;
     if (lane == 0u) {
         const float initialNorm = restartCycle == 0u
             ? norm : previousDiagnostics.y;

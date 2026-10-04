@@ -55,6 +55,7 @@ numi coupled-profile --mode tissue
 numi coupled-profile --mode perfused
 numi coupled-profile --mode coupled-perfused
 numi coupled-profile --mode perfused-puncture
+numi coupled-profile --mode perfused-pull-through
 numi coupled-profile --mode heterogeneous
 numi coupled-profile --mode heterogeneous-mixed
 numi coupled-profile --mode heterogeneous-mutation
@@ -88,6 +89,31 @@ tearing while retaining external needle contact. These modes prove execution
 and replay, not ex-vivo calibration or
 indistinguishable visual/physical fidelity.
 
+The `perfused-pull-through` mode extends that boundary into one continuous
+curved-needle transaction: a synthetic interface cohesive strength admits the
+first finite tract, the live tip advances a connected mass-conserving channel
+through the four-layer wall, and the hard swage pulls the same device-resident
+DER strand through it. Promotion requires exact per-layer topology identity,
+zero removed tissue mass, bounded determinant/residual and perfused-field
+state, resolved strand/channel contact, distal thread clearance, complete-state
+replay hashes, and zero failed steps. Bulk cohesive-face tearing, local
+layer-specific contact interfaces, post-admission fracture-energy expenditure,
+and ex-vivo parameter calibration remain future boundaries rather than implied
+capabilities.
+
 Promotion remains gated by exact replay, FP64 parity, physical outcomes, zero
 failed steps, and same-device Metal timeline/counter evidence. A successful
-build or probe alone is not a physical-fidelity claim.
+build or probe alone is not a physical-fidelity claim. The pull-through profile
+also refuses a dirty worktree so its revision and runtime fingerprints identify
+the exact source being promoted. Its Metal System Trace execution is replay B,
+so the timeline is compared against the uninstrumented replay without adding a
+redundant third full solver execution; a supported detailed-counter capture
+remains a separate measurement. Before that long counter capture, the same
+device runs a small Metal counter preflight; a null or failed headless counter
+set is recorded as unsupported without launching another full tissue path.
+
+## Latest medical deformable clip: suture entry prefix
+
+[![Puncture-accepted state from the two-frame native Metal clip](docs/assets/perfused-suture-entry-prefix-20261004/perfused-suture-entry-prefix-20261004-poster.png)](docs/assets/perfused-suture-entry-prefix-20261004/perfused-suture-entry-prefix-20261004.mp4)
+
+[Watch the clip](docs/assets/perfused-suture-entry-prefix-20261004/perfused-suture-entry-prefix-20261004.mp4). It shows two exact saved states: pre-entry and the first accepted puncture state on a synthetic four-layer coupon. The second state has one active channel and 5.783 µm maximum tissue-node displacement. The native curved-passage batch remained in flight until the bounded 5 min 50 s run was stopped; no completed needle passage or thread pull-through was captured. This is an incomplete software demonstration, not a wound-closure, calibration, or clinical result. The [source-bound run record](docs/assets/perfused-suture-entry-prefix-20261004/README.md) preserves the snapshots, binary/source hashes, and rendering code.

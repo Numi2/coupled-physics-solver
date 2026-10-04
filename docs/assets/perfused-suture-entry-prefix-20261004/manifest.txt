@@ -1,0 +1,14 @@
+1ddeb40d78be1d7d7eb262adf001adea2376faf4
+ M .numi/commands/coupled-profile
+ M README.md
+ M apps/dual_psm_suture_handoff_probe.cpp
+ M matter/src/metal/fgmres.metalinc
+ M matter/src/runtime.mm
+?? scripts/
+8454b5fa94c985aa8512ab907014aa9d6e4c22ea55ce0619e3ce3f07aad13785  /Users/n/numi-perfused-main-build-20261004/bin/coupled_suture_handoff_probe
+ProductName:		macOS
+ProductVersion:		26.6
+BuildVersion:		25G72
+      Model Identifier: Mac16,11
+      Chip: Apple M4 Pro
+      Memory: 24 GB

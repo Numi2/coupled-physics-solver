@@ -3638,16 +3638,19 @@ RuntimeDiagnostics Runtime::encode(const EncodeRequest& request) {
                 (linearIterationBudget + restart - 1u) / restart;
             const float nonlinearTolerance = std::max(
                 state.mixedSolverValue.residualTolerances.x, 0.0f);
-            const float forcingFloor = std::sqrt(nonlinearTolerance);
             // Contact coupled to transport/activation needs a more faithful
             // first Newton direction than the former 0.25 relative solve.
-            // Keep this device-local forcing schedule stricter without
-            // changing any authored nonlinear publication tolerance.
+            // Continue tightening the inexact-Newton forcing term until it
+            // reaches the authored nonlinear publication tolerance.  The
+            // former sqrt(tolerance) floor froze the inner solve at 2.236%
+            // for a 5e-4 certificate, so raw incompressibility could remain
+            // just outside its unchanged gate through every encoded Newton
+            // pass even while the scaled KKT norm appeared converged.
             const float scheduledForcing = std::ldexp(
                 0.15f,
-                -static_cast<int>(std::min(nonlinearIteration, 4u)));
+                -static_cast<int>(std::min(nonlinearIteration, 24u)));
             const float linearForcing = std::clamp(
-                std::max(forcingFloor, scheduledForcing),
+                scheduledForcing,
                 nonlinearTolerance,
                 0.15f);
             NMMicrostepGPU operatorMicro = micro;
@@ -3683,6 +3686,12 @@ RuntimeDiagnostics Runtime::encode(const EncodeRequest& request) {
                              offset:0u atIndex:17u];
                 [encoder setBuffer:state.coupledGeneralizedCandidate
                              offset:0u atIndex:18u];
+                [encoder setBuffer:state.femTetrahedraCandidate
+                             offset:0u atIndex:19u];
+                [encoder setBuffer:state.femFieldsCandidate
+                             offset:0u atIndex:20u];
+                [encoder setBuffer:state.mixedMaterials
+                             offset:0u atIndex:21u];
             });
             dispatchThreads("nm_fgmres_build_preconditioner", femNodeTotal, [&] {
                 setDispatch();

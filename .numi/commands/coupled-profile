@@ -10,11 +10,12 @@ fi
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
     printf '%s\n' \
-        "Usage: numi coupled-profile [--mode metal4|tissue|perfused|coupled-perfused|perfused-puncture|heterogeneous|heterogeneous-mixed|heterogeneous-mutation] [--build-dir PATH] [--artifact-dir PATH] [--no-build] [--timeline-only]" \
+        "Usage: numi coupled-profile [--mode metal4|tissue|perfused|coupled-perfused|perfused-puncture|perfused-pull-through|heterogeneous|heterogeneous-mixed|heterogeneous-mutation] [--build-dir PATH] [--artifact-dir PATH] [--no-build] [--timeline-only]" \
         "" \
         "Runs the selected probe twice, requires exact normalized replay, records" \
         "a Metal System Trace, exports GPU/error/counter tables, and attempts the" \
         "headless detailed-counter profile unless --timeline-only is selected." \
+        "The perfused-pull-through promotion requires a clean exact revision." \
         "Counter unavailability is recorded and exits 4; it is never inferred."
     exit 0
 fi
@@ -79,6 +80,11 @@ case "$profile_mode" in
         profile_argument=--perfused-tissue-puncture-only
         profile_gate='mass-conserving tapered-needle channel through a flat four-layer perfused-active coupon with exact per-material topology identity; parameters and preactivation are synthetic evidence-contract fixtures, same-object collision and cohesive tearing are disabled'
         ;;
+    perfused-pull-through)
+        profile_target=coupled_suture_handoff_probe
+        profile_argument=--perfused-tissue-curved-pull-through-only
+        profile_gate='continuous curved needle, hard swage and live DER strand passage through a mass-conserving channel in flat four-layer perfused-active tissue with exact per-material topology identity; puncture admission uses synthetic interface cohesive strength, while same-object collision and bulk cohesive-face tearing are disabled'
+        ;;
     heterogeneous)
         profile_target=coupled_matter_physics_probe
         profile_argument=--heterogeneous-fem
@@ -94,7 +100,7 @@ case "$profile_mode" in
         profile_argument=--heterogeneous-puncture-mutation
         profile_gate='two-material cylindrical puncture with per-tetrahedron identity and density-accounting gates'
         ;;
-    *) printf '%s\n' "mode must be metal4, tissue, perfused, coupled-perfused, perfused-puncture, heterogeneous, heterogeneous-mixed, or heterogeneous-mutation" >&2; exit 2 ;;
+    *) printf '%s\n' "mode must be metal4, tissue, perfused, coupled-perfused, perfused-puncture, perfused-pull-through, heterogeneous, heterogeneous-mixed, or heterogeneous-mutation" >&2; exit 2 ;;
 esac
 
 if [ -z "$profile_artifact" ]; then
@@ -113,12 +119,20 @@ fi
 [ -n "$profile_cmake" ] || { printf '%s\n' "cmake is unavailable" >&2; exit 2; }
 command -v xcrun >/dev/null 2>&1 || { printf '%s\n' "xcrun is unavailable" >&2; exit 2; }
 
-mkdir -p "$profile_artifact/exports"
-profile_summary="$profile_artifact/summary.txt"
 profile_revision=$(git -C "$profile_root" rev-parse HEAD)
 profile_branch=$(git -C "$profile_root" branch --show-current)
 [ -n "$profile_branch" ] || profile_branch=detached
 profile_status=$(git -C "$profile_root" status --porcelain=v1)
+if [ "$profile_mode" = perfused-pull-through ] &&
+   [ -n "$profile_status" ]; then
+    printf '%s\n' \
+        "perfused-pull-through promotion requires a clean exact revision" \
+        >&2
+    exit 2
+fi
+
+mkdir -p "$profile_artifact/exports"
+profile_summary="$profile_artifact/summary.txt"
 {
     printf 'revision=%s\n' "$profile_revision"
     printf 'branch=%s\n' "$profile_branch"
@@ -136,11 +150,31 @@ system_profiler SPHardwareDataType SPDisplaysDataType > "$profile_artifact/devic
 if [ "$profile_build_enabled" -eq 1 ]; then
     "$profile_cmake" -S "$profile_root" -B "$profile_build" -DCMAKE_BUILD_TYPE=Release
     "$profile_cmake" --build "$profile_build" --target "$profile_target" --parallel "${NUMI_COUPLED_BUILD_JOBS:-8}"
+    if [ "$profile_mode" = perfused-pull-through ] &&
+       [ "$profile_timeline_only" -eq 0 ]; then
+        "$profile_cmake" --build "$profile_build" \
+            --target coupled_metal4_execution_probe \
+            --parallel "${NUMI_COUPLED_BUILD_JOBS:-8}"
+    fi
 fi
 profile_probe="$profile_build/bin/$profile_target"
 [ -x "$profile_probe" ] || { printf '%s\n' "probe unavailable: $profile_probe" >&2; exit 2; }
+profile_counter_preflight=
+if [ "$profile_mode" = perfused-pull-through ] &&
+   [ "$profile_timeline_only" -eq 0 ]; then
+    profile_counter_preflight="$profile_build/bin/coupled_metal4_execution_probe"
+    [ -x "$profile_counter_preflight" ] || {
+        printf '%s\n' \
+            "counter preflight unavailable: $profile_counter_preflight" >&2
+        exit 2
+    }
+fi
 
 shasum -a 256 "$profile_probe" > "$profile_artifact/runtime-sha256.txt"
+if [ -n "$profile_counter_preflight" ]; then
+    shasum -a 256 "$profile_counter_preflight" \
+        >> "$profile_artifact/runtime-sha256.txt"
+fi
 for profile_binary in \
     "$profile_build/shaders/CoupledPhysics.metallib" \
     "$profile_build/matter/shaders/NumiMatter.metallib"; do
@@ -160,15 +194,34 @@ profile_run() {
             > "$profile_artifact/$profile_name.stdout" \
             2> "$profile_artifact/$profile_name.stderr"
     fi
+    profile_normalize "$profile_name"
+}
+
+profile_normalize() {
+    profile_name=$1
     sed -E \
-        -e 's/(reference_gpu_ms|coupled_gpu_ms|gpu_ms)=[^ ]+[ ]*//g' \
+        -e 's/[[:alnum:]_]*gpu_ms=[^ ]+[ ]*//g' \
         -e 's/"gpu_ms":[^,}]+,//g' \
         "$profile_artifact/$profile_name.stdout" \
         > "$profile_artifact/$profile_name.normalized"
 }
 
 profile_run replay-a
-profile_run replay-b
+
+profile_trace="$profile_artifact/coupled.trace"
+if [ -n "$profile_argument" ]; then
+    xcrun xctrace record --template "Metal System Trace" --no-prompt \
+        --target-stdout "$profile_artifact/replay-b.stdout" \
+        --output "$profile_trace" --launch -- \
+        "$profile_probe" "$profile_argument" \
+        > "$profile_artifact/xctrace-record.log" 2>&1
+else
+    xcrun xctrace record --template "Metal System Trace" --no-prompt \
+        --target-stdout "$profile_artifact/replay-b.stdout" \
+        --output "$profile_trace" --launch -- "$profile_probe" \
+        > "$profile_artifact/xctrace-record.log" 2>&1
+fi
+profile_normalize replay-b
 cmp "$profile_artifact/replay-a.normalized" "$profile_artifact/replay-b.normalized"
 shasum -a 256 "$profile_artifact/replay-a.normalized" > "$profile_artifact/replay.sha256"
 if [ "$profile_mode" = tissue ]; then
@@ -190,26 +243,19 @@ if [ "$profile_mode" = perfused-puncture ]; then
         "$profile_artifact/replay-a.stdout"
     grep -q 'failed_steps=0' "$profile_artifact/replay-a.stdout"
 fi
+if [ "$profile_mode" = perfused-pull-through ]; then
+    grep -q 'perfused_tissue_curved_through_wall_passage=ok' \
+        "$profile_artifact/replay-a.stdout"
+    grep -q 'perfused_tissue_suture_pull_through=ok' \
+        "$profile_artifact/replay-a.stdout"
+    grep -q 'failed_steps=0' "$profile_artifact/replay-a.stdout"
+fi
 if [ "$profile_mode" = heterogeneous ] ||
    [ "$profile_mode" = heterogeneous-mixed ] ||
    [ "$profile_mode" = heterogeneous-mutation ]; then
     grep -q '"representation":"heterogeneous_' \
         "$profile_artifact/replay-a.stdout"
     grep -q '"failed_steps":0' "$profile_artifact/replay-a.stdout"
-fi
-
-profile_trace="$profile_artifact/coupled.trace"
-if [ -n "$profile_argument" ]; then
-    xcrun xctrace record --template "Metal System Trace" --no-prompt \
-        --target-stdout "$profile_artifact/trace-target.stdout" \
-        --output "$profile_trace" --launch -- \
-        "$profile_probe" "$profile_argument" \
-        > "$profile_artifact/xctrace-record.log" 2>&1
-else
-    xcrun xctrace record --template "Metal System Trace" --no-prompt \
-        --target-stdout "$profile_artifact/trace-target.stdout" \
-        --output "$profile_trace" --launch -- "$profile_probe" \
-        > "$profile_artifact/xctrace-record.log" 2>&1
 fi
 xcrun xctrace export --input "$profile_trace" --toc \
     --output "$profile_artifact/exports/toc.xml"
@@ -235,6 +281,44 @@ if [ "$profile_timeline_only" -eq 1 ]; then
     printf 'performance_counter_status=not_claimed\n' >> "$profile_summary"
     printf 'timeline and replay passed: %s\n' "$profile_artifact"
     exit 0
+fi
+
+if [ "$profile_mode" = perfused-pull-through ]; then
+    profile_counter_preflight_trace="$profile_artifact/counter-preflight.trace"
+    set +e
+    xcrun xctrace record --template "Metal System Trace" \
+        --instrument "Metal GPU Counters" --no-prompt \
+        --target-stdout "$profile_artifact/counter-preflight.stdout" \
+        --output "$profile_counter_preflight_trace" --launch -- \
+        "$profile_counter_preflight" \
+        > "$profile_artifact/xctrace-counter-preflight.log" 2>&1
+    profile_counter_preflight_exit=$?
+    set -e
+    if [ "$profile_counter_preflight_exit" -ne 0 ]; then
+        printf 'performance_counter_status=preflight_record_failed\n' \
+            >> "$profile_summary"
+        printf 'timeline passed; detailed counter preflight failed: %s\n' \
+            "$profile_artifact" >&2
+        exit 4
+    fi
+    xcrun xctrace export --input "$profile_counter_preflight_trace" --toc \
+        --output "$profile_artifact/exports/counter-preflight-toc.xml"
+    if ! grep -q 'return-exit-status="0"' \
+        "$profile_artifact/exports/counter-preflight-toc.xml"; then
+        printf 'performance_counter_status=preflight_target_failed\n' \
+            >> "$profile_summary"
+        printf 'timeline passed; counter preflight target failed: %s\n' \
+            "$profile_artifact" >&2
+        exit 4
+    fi
+    if grep -q 'Counter Set: (null)' \
+        "$profile_artifact/exports/counter-preflight-toc.xml"; then
+        printf 'performance_counter_status=unsupported\n' \
+            >> "$profile_summary"
+        printf 'timeline passed; detailed counters unsupported: %s\n' \
+            "$profile_artifact" >&2
+        exit 4
+    fi
 fi
 
 profile_counter_trace="$profile_artifact/coupled-gpu-counters.trace"

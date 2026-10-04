@@ -76,6 +76,134 @@ void appendStateHash(std::uint64_t& hash, const std::vector<T>& values) {
     }
 }
 
+void appendMatterStateHash(
+    std::uint64_t& hash,
+    const numi::matter::RuntimeStateSnapshot& snapshot
+) {
+    appendStateHash(
+        hash,
+        &snapshot.sourcePhysicsFingerprint,
+        sizeof(snapshot.sourcePhysicsFingerprint)
+    );
+    appendStateHash(
+        hash,
+        &snapshot.allocationGeneration,
+        sizeof(snapshot.allocationGeneration)
+    );
+    appendStateHash(
+        hash,
+        &snapshot.learnedWeightRevision,
+        sizeof(snapshot.learnedWeightRevision)
+    );
+    appendStateHash(
+        hash,
+        &snapshot.materialStateStride,
+        sizeof(snapshot.materialStateStride)
+    );
+    appendStateHash(hash, snapshot.particles);
+    appendStateHash(hash, snapshot.femNodes);
+    appendStateHash(hash, snapshot.femFields);
+    appendStateHash(hash, snapshot.femTopologyNodes);
+    appendStateHash(hash, snapshot.femTopologyTetrahedra);
+    appendStateHash(hash, snapshot.cohesiveFaces);
+    appendStateHash(hash, snapshot.punctureChannels);
+    appendStateHash(hash, snapshot.topologyStates);
+    appendStateHash(hash, snapshot.statuses);
+    appendStateHash(hash, snapshot.solverCertificates);
+    appendStateHash(hash, snapshot.mpmActiveNodeIndices);
+    appendStateHash(hash, snapshot.mpmNodeToActive);
+    appendStateHash(hash, snapshot.mpmActiveNodeCounts);
+    appendStateHash(hash, snapshot.rigidGeneralizedCandidate);
+    appendStateHash(hash, snapshot.learnedWeights);
+    appendStateHash(hash, snapshot.adaptive);
+    appendStateHash(hash, snapshot.schedulers);
+    appendStateHash(hash, snapshot.reactions);
+    appendStateHash(hash, snapshot.rigidStates);
+    appendStateHash(hash, snapshot.contactSamples);
+    appendStateHash(hash, snapshot.contactHistories);
+    appendStateHash(hash, snapshot.deformableContactHistories);
+    appendStateHash(hash, snapshot.particleMaterialState);
+    appendStateHash(hash, snapshot.femMaterialState);
+    appendStateHash(hash, snapshot.identification);
+    appendStateHash(hash, snapshot.environmentParameters);
+}
+
+struct TissueFieldMetrics {
+    double minimumMechanicalPressurePa =
+        std::numeric_limits<double>::infinity();
+    double maximumMechanicalPressurePa =
+        -std::numeric_limits<double>::infinity();
+    double minimumPorePressurePa =
+        std::numeric_limits<double>::infinity();
+    double maximumPorePressurePa =
+        -std::numeric_limits<double>::infinity();
+    double minimumActivation =
+        std::numeric_limits<double>::infinity();
+    double maximumActivation =
+        -std::numeric_limits<double>::infinity();
+    double minimumTemperatureK =
+        std::numeric_limits<double>::infinity();
+    double maximumTemperatureK =
+        -std::numeric_limits<double>::infinity();
+    bool finite = true;
+};
+
+TissueFieldMetrics tissueFieldMetrics(
+    const std::vector<NMFEMFieldStateGPU>& fields
+) {
+    TissueFieldMetrics result;
+    result.finite = !fields.empty();
+    for (const NMFEMFieldStateGPU& field : fields) {
+        const std::array<double, 8> values{
+            field.primary.x,
+            field.primary.y,
+            field.primary.z,
+            field.primary.w,
+            field.secondary.x,
+            field.secondary.y,
+            field.secondary.z,
+            field.secondary.w,
+        };
+        result.finite = result.finite && std::ranges::all_of(
+            values,
+            [](const double value) { return std::isfinite(value); }
+        );
+        result.minimumMechanicalPressurePa = std::min(
+            result.minimumMechanicalPressurePa,
+            static_cast<double>(field.primary.x)
+        );
+        result.maximumMechanicalPressurePa = std::max(
+            result.maximumMechanicalPressurePa,
+            static_cast<double>(field.primary.x)
+        );
+        result.minimumTemperatureK = std::min(
+            result.minimumTemperatureK,
+            static_cast<double>(field.primary.y)
+        );
+        result.maximumTemperatureK = std::max(
+            result.maximumTemperatureK,
+            static_cast<double>(field.primary.y)
+        );
+        result.minimumPorePressurePa = std::min(
+            result.minimumPorePressurePa,
+            static_cast<double>(field.primary.z)
+        );
+        result.maximumPorePressurePa = std::max(
+            result.maximumPorePressurePa,
+            static_cast<double>(field.primary.z)
+        );
+        result.minimumActivation = std::min(
+            result.minimumActivation,
+            static_cast<double>(field.secondary.x)
+        );
+        result.maximumActivation = std::max(
+            result.maximumActivation,
+            static_cast<double>(field.secondary.x)
+        );
+    }
+    return result;
+}
+
 constexpr std::array<std::uint32_t, 4> kJawATeeth{15u, 18u, 20u, 22u};
 constexpr std::array<std::uint32_t, 4> kJawBTeeth{17u, 19u, 21u, 23u};
 constexpr std::uint32_t kNeedleFirstShape =
@@ -141,6 +269,12 @@ constexpr double kSutureTissueContactSlopM = 1.0e-4;
 // The tip still approaches from positive clearance and must independently
 // exceed the unchanged physical impulse and geometry-crossing gates.
 constexpr double kPerfusedPunctureInitialClearanceM = 8.8e-5;
+constexpr double kPerfusedPullThroughInitialClearanceM = 8.8e-5;
+// A refined surface resolves pre-puncture dimpling instead of concentrating
+// the complete reaction into one coarse node. Permit a bounded kinematic
+// approach at the unchanged 20 mm/s until the authored cohesive-traction gate
+// admits fracture; no geometric penetration or strength relaxation is used.
+constexpr std::uint32_t kPerfusedPunctureMaximumApproachSteps = 192u;
 constexpr double kPerfusedDirectContactInitialClearanceM = 7.5e-5;
 // The receiver-frame construction targets 20 um beyond the accepted 100 um
 // distal clearance so FP32 pose storage cannot turn an exactly-on-threshold
@@ -4329,7 +4463,7 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
     // qualified 6x6x1 transaction mesh. A puncture uses the production
     // 18x16x2 wall so entry crosses a through-thickness volume rather than the
     // former single-layer contact surrogate. Pull-through increases this to a
-    // 34x40x4 mesh and grades it about the 3 mm bite: the local cell dimensions
+    // 34x40x8 mesh and grades it about the 3 mm bite: the local cell dimensions
     // resolve both the 0.126 mm terminal taper and the 0.20 mm strand/contact
     // band without shrinking the specimen.
     numi::matter::PorcineJejunumFungSpec spec;
@@ -4595,6 +4729,9 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
     coupon.object.mutationPolicy.punctureImpulseThreshold = punctureTip
         ? kPunctureImpulseThresholdNs
         : 0.0;
+    coupon.object.mutationPolicy.cohesivePuncture =
+        perfusedLayers && punctureTip &&
+        sutureContactSegmentCount != 0u;
 
     const MRBodyStateGPU& needle = world.defaultSceneBodies[0];
     const Quaternion orientation{
@@ -4899,11 +5036,15 @@ numi::matter::CompiledWorld compileNeedleSutureTissueWorld(
 
     numi::matter::WorldSource source;
     source.environmentCount = 1u;
+    const bool refinedPerfusedPassage =
+        perfusedLayers && punctureTip &&
+        sutureContactSegmentCount != 0u;
     source.frameTimestep =
         (kControlTimestep / kPhysicsSubsteps) *
         (sutureContactSegmentCount == 0u
              ? 1.0
-             : static_cast<double>(kSutureEntryMatterRateMultiplier));
+             : static_cast<double>(kSutureEntryMatterRateMultiplier)) /
+        (refinedPerfusedPassage ? 2.0 : 1.0);
     source.gravity = {0.0, 0.0, 0.0};
     source.contactSlop = kSutureTissueContactSlopM;
     source.maximumDepenetrationSpeed = 0.05;
@@ -5248,6 +5389,8 @@ Arguments parseArguments(const int argc, const char* const argv[]) {
             argument == "--tissue-suture-passage-only" ||
             argument == "--tissue-curved-passage-only" ||
             argument == "--tissue-curved-pull-through-only" ||
+            argument ==
+                "--perfused-tissue-curved-pull-through-only" ||
             argument == "--receiver-frame-ik-only" ||
             argument == "--receiver-extraction-geometry-only" ||
             argument == "--receiver-extraction-giver-hold-only" ||
@@ -6407,6 +6550,174 @@ void writeHandoffStateArtifact(
     require(output.good(), "could not publish handoff state artifact");
 }
 
+void writePerfusedSutureVisualState(
+    const std::filesystem::path& directory,
+    const std::string_view phase,
+    const std::uint64_t step,
+    const double simulationTimeSeconds,
+    const double timestepSeconds,
+    const metalrobo::HeterogeneousWorld& world,
+    const numi::matter::CompiledWorld& matterWorld,
+    const numi::matter::PorcineJejunumClosureCoupon& coupon,
+    const MRBodyStateGPU& needle,
+    const std::vector<Vec3>& threadPositions,
+    const std::vector<Vec3>& tissuePositions,
+    const std::vector<NMPunctureChannelGPU>& channels,
+    const std::vector<NMRigidStateGPU>& rigidStates = {}
+) {
+    if (directory.empty()) {
+        return;
+    }
+    require(
+        tissuePositions.size() >= coupon.metadata.nodeCount &&
+            threadPositions.size() ==
+                world.rods[0].model.restPositions.size(),
+        "perfused suture visualization state is incomplete"
+    );
+    std::error_code error;
+    std::filesystem::create_directories(directory, error);
+    require(!error, "could not create perfused suture state directory");
+    const std::filesystem::path path = directory /
+        (std::string{phase} + ".tsv");
+    require(
+        !std::filesystem::exists(path, error) && !error,
+        "perfused suture state path already exists: " + path.string()
+    );
+    std::ofstream output(path, std::ios::out | std::ios::trunc);
+    require(output.good(), "could not open perfused suture state artifact");
+    output << std::setprecision(17)
+        << "schema\tnumi.perfused-suture-entry-state.v2\n"
+        << "phase\t" << phase << '\n'
+        << "step\t" << step << '\n'
+        << "simulation_time_s\t" << simulationTimeSeconds << '\n'
+        << "timestep_s\t" << timestepSeconds << '\n'
+        << "tissue_model\tsynthetic-four-layer-perfused-fixture\n"
+        << "tissue_geometry_m\t" << coupon.spec.lengthM.value << '\t'
+        << coupon.spec.widthM.value << '\t'
+        << coupon.spec.thicknessM.value << '\t'
+        << coupon.spec.incisionGapM.value << '\n'
+        << "longitudinal_axis\t" << coupon.metadata.longitudinalAxis[0]
+        << '\t' << coupon.metadata.longitudinalAxis[1] << '\t'
+        << coupon.metadata.longitudinalAxis[2] << '\n'
+        << "circumferential_axis\t"
+        << coupon.metadata.circumferentialAxis[0] << '\t'
+        << coupon.metadata.circumferentialAxis[1] << '\t'
+        << coupon.metadata.circumferentialAxis[2] << '\n'
+        << "thickness_axis\t" << coupon.metadata.thicknessAxis[0]
+        << '\t' << coupon.metadata.thicknessAxis[1] << '\t'
+        << coupon.metadata.thicknessAxis[2] << '\n'
+        << "needle_position\t" << needle.position.x << '\t'
+        << needle.position.y << '\t' << needle.position.z << '\n'
+        << "needle_orientation_xyzw\t" << needle.orientation.x << '\t'
+        << needle.orientation.y << '\t' << needle.orientation.z << '\t'
+        << needle.orientation.w << '\n'
+        << "needle_linear_velocity\t"
+        << needle.linearVelocityAndInverseMass.x << '\t'
+        << needle.linearVelocityAndInverseMass.y << '\t'
+        << needle.linearVelocityAndInverseMass.z << '\n'
+        << "thread_radius_m\t" << world.rods[0].model.radius << '\n'
+        << "thread_node_count\t" << threadPositions.size() << '\n'
+        << "tissue_node_count\t" << coupon.metadata.nodeCount << '\n';
+    for (std::size_t node = 0u;
+         node < coupon.metadata.nodeCount;
+         ++node) {
+        const Vec3 position = tissuePositions[node];
+        output << "tissue_node\t" << node << '\t'
+            << position.x << '\t' << position.y << '\t' << position.z
+            << '\n';
+    }
+    std::uint32_t surfaceTriangles = 0u;
+    for (const NMFEMSurfaceFaceGPU& face : matterWorld.fem.surfaceFaces) {
+        if (face.adjacency.y != NM_INVALID_INDEX ||
+            (face.adjacency.w & NM_TOPOLOGY_ACTIVE) == 0u) {
+            continue;
+        }
+        const std::uint32_t tetrahedronIndex = face.adjacency.x;
+        const std::uint32_t oppositeCorner = face.sides.x;
+        require(
+            tetrahedronIndex < matterWorld.fem.tetrahedra.size() &&
+                oppositeCorner < 4u,
+            "perfused suture boundary face has invalid ownership"
+        );
+        const NMTetrahedronGPU& tetrahedron =
+            matterWorld.fem.tetrahedra[tetrahedronIndex];
+        const std::array<std::uint32_t, 4> nodes{
+            tetrahedron.nodes.x,
+            tetrahedron.nodes.y,
+            tetrahedron.nodes.z,
+            tetrahedron.nodes.w,
+        };
+        std::array<std::uint32_t, 3> triangle{};
+        std::size_t triangleNode = 0u;
+        for (std::size_t corner = 0u; corner < nodes.size(); ++corner) {
+            if (corner == oppositeCorner) {
+                continue;
+            }
+            require(
+                nodes[corner] < coupon.metadata.nodeCount &&
+                    triangleNode < triangle.size(),
+                "perfused suture boundary face escapes the tissue object"
+            );
+            triangle[triangleNode++] = nodes[corner];
+        }
+        require(
+            triangleNode == triangle.size(),
+            "perfused suture boundary face is not triangular"
+        );
+        output << "tissue_surface_triangle\t" << surfaceTriangles++
+            << '\t' << triangle[0] << '\t' << triangle[1] << '\t'
+            << triangle[2] << '\t' << tetrahedron.identity.x << '\n';
+    }
+    require(
+        surfaceTriangles > 0u,
+        "perfused suture visualization has no tissue boundary triangles"
+    );
+    for (std::size_t node = 0u; node < threadPositions.size(); ++node) {
+        const Vec3 position = threadPositions[node];
+        output << "thread_node\t" << node << '\t'
+            << position.x << '\t' << position.y << '\t' << position.z
+            << '\n';
+    }
+    const std::size_t rigidProxyCount = std::min(
+        rigidStates.size(), matterWorld.contact.rigidProxies.size()
+    );
+    for (std::size_t index = 0u; index < rigidProxyCount; ++index) {
+        const NMRigidProxyGPU& proxy = matterWorld.contact.rigidProxies[index];
+        if ((proxy.flags &
+             (NM_RIGID_PUNCTURE_TIP | NM_RIGID_SUTURE_STRAND)) == 0u) {
+            continue;
+        }
+        const NMRigidStateGPU& state = rigidStates[index];
+        output << "rigid_proxy\t" << index << '\t' << proxy.flags << '\t'
+            << proxy.shapeKind << '\t'
+            << state.centerAndRadius.x << '\t'
+            << state.centerAndRadius.y << '\t'
+            << state.centerAndRadius.z << '\t'
+            << state.centerAndRadius.w << '\t'
+            << state.extent.x << '\t' << state.extent.y << '\t'
+            << state.extent.z << '\t'
+            << state.orientation.x << '\t' << state.orientation.y << '\t'
+            << state.orientation.z << '\t' << state.orientation.w << '\n';
+    }
+    for (std::size_t index = 0u; index < channels.size(); ++index) {
+        const NMPunctureChannelGPU& channel = channels[index];
+        if ((channel.identity.w & NM_TOPOLOGY_ACTIVE) == 0u) {
+            continue;
+        }
+        output << "puncture_channel\t" << index << '\t'
+            << channel.originAndRadius.x << '\t'
+            << channel.originAndRadius.y << '\t'
+            << channel.originAndRadius.z << '\t'
+            << channel.originAndRadius.w << '\t'
+            << channel.axisAndHalfLength.x << '\t'
+            << channel.axisAndHalfLength.y << '\t'
+            << channel.axisAndHalfLength.z << '\t'
+            << channel.axisAndHalfLength.w << '\n';
+    }
+    output.close();
+    require(output.good(), "could not publish perfused suture state artifact");
+}
+
 PhaseResult initializePhase(
     metalrobo::MetalWorldContext& context,
     const metalrobo::CompiledWorld& compiled,
@@ -6559,6 +6870,44 @@ PhaseResult continuePhaseWithKinematicTargets(
     return phase;
 }
 
+PhaseResult continuePhaseWithKinematicTargetsUnchecked(
+    metalrobo::MetalWorldContext& context,
+    const metalrobo::CompiledWorld& compiled,
+    const metalrobo::MetalWorldStepConfig& config,
+    metalrobo::MetalWorldResidentState& resident,
+    const std::vector<float>& efforts,
+    const std::vector<MRBodyStateGPU>& kinematicTargets,
+    const std::uint32_t steps,
+    const std::string& name
+) {
+    require(
+        kinematicTargets.size() ==
+            static_cast<std::size_t>(steps) * compiled.sceneBodyCount(),
+        name + " kinematic target stream has the wrong dimensions"
+    );
+    const metalrobo::MetalWorldBatch batch{
+        .environmentCount = 1u,
+        .controlStepCount = steps,
+        .efforts = efforts,
+        .kinematicTargets = kinematicTargets,
+    };
+    metalrobo::MetalWorldSubmission submission;
+    const auto submitted = context.submitResident(
+        compiled,
+        batch,
+        config,
+        resident,
+        submission
+    );
+    require(
+        submitted.succeeded() && submission.valid(),
+        name + " submission failed: " + submitted.message
+    );
+    PhaseResult phase;
+    phase.diagnostics = submission.wait(phase.result);
+    return phase;
+}
+
 PhaseResult continuePhaseUnchecked(
     metalrobo::MetalWorldContext& context,
     const metalrobo::CompiledWorld& compiled,
@@ -6603,8 +6952,15 @@ int main(const int argc, const char* const argv[]) {
             options.mode == "--perfused-tissue-coupling-only";
         const bool perfusedTissuePunctureOnly =
             options.mode == "--perfused-tissue-puncture-only";
+        const bool perfusedTissueCurvedPullThroughOnly =
+            options.mode ==
+                "--perfused-tissue-curved-pull-through-only";
         const bool perfusedTissue =
-            perfusedTissueCouplingOnly || perfusedTissuePunctureOnly;
+            perfusedTissueCouplingOnly || perfusedTissuePunctureOnly ||
+            perfusedTissueCurvedPullThroughOnly;
+        const bool perfusedTissuePuncture =
+            perfusedTissuePunctureOnly ||
+            perfusedTissueCurvedPullThroughOnly;
         const bool tissueCouplingOnly =
             options.mode == "--tissue-coupling-only" ||
             perfusedTissueCouplingOnly;
@@ -6619,11 +6975,12 @@ int main(const int argc, const char* const argv[]) {
         const bool tissueSutureEntryContactOnly =
             tissueSutureEntryOnly || tissueSutureCadenceOnly;
         const bool tissueCurvedPullThroughOnly =
-            options.mode == "--tissue-curved-pull-through-only";
+            options.mode == "--tissue-curved-pull-through-only" ||
+            perfusedTissueCurvedPullThroughOnly;
         const bool tissuePunctureOnly =
             options.mode == "--tissue-puncture-only" ||
             options.mode == "--tissue-puncture-advance-only" ||
-            perfusedTissuePunctureOnly ||
+            perfusedTissuePuncture ||
             tissueSutureEntryContactOnly ||
             tissueSuturePassageOnly ||
             options.mode == "--tissue-curved-passage-only" ||
@@ -6639,6 +6996,8 @@ int main(const int argc, const char* const argv[]) {
             tissueCurvedPullThroughOnly;
         const bool tissueDirectSutureContact =
             tissueSutureContactOnly || perfusedTissueCouplingOnly;
+        const std::uint32_t tissueEntryTemporalRefinement =
+            perfusedTissueCurvedPullThroughOnly ? 2u : 1u;
         const bool receiverFrameIkOnly =
             options.mode == "--receiver-frame-ik-only";
         const bool receiverExtractionGeometryOnly =
@@ -11465,7 +11824,9 @@ int main(const int argc, const char* const argv[]) {
                 tissuePunctureOnly
                     ? (perfusedTissuePunctureOnly
                         ? kPerfusedPunctureInitialClearanceM
-                        : kPunctureInitialClearanceM)
+                        : (perfusedTissueCurvedPullThroughOnly
+                            ? kPerfusedPullThroughInitialClearanceM
+                            : kPunctureInitialClearanceM))
                     : (tissueRestOnly
                         ? 1.5e-4
                         : (perfusedTissueCouplingOnly
@@ -11569,7 +11930,8 @@ int main(const int argc, const char* const argv[]) {
                 (tissueDirectSutureContact
                      ? static_cast<double>(
                          kSutureEntryMatterRateMultiplier
-                     ) : 1.0)
+                     ) : 1.0) /
+                static_cast<double>(tissueEntryTemporalRefinement)
             );
             stepConfig.physicsSubsteps = tissueDirectSutureContact
                 ? kSutureEntryMatterRateMultiplier : 1u;
@@ -11611,7 +11973,43 @@ int main(const int argc, const char* const argv[]) {
         std::uint64_t preReleaseSuccessfulSteps = 0u;
         double preReleaseGpuMilliseconds = 0.0;
 
+        const double entryTimestepSeconds =
+            static_cast<double>(stepConfig.timestepSeconds);
         if (tissueMatterOnly) {
+            if (perfusedTissueCurvedPullThroughOnly &&
+                !options.stateOutputDirectory.empty()) {
+                std::vector<Vec3> initialThreadPositions;
+                initialThreadPositions.reserve(
+                    world.rods[0].defaultState.positions.size()
+                );
+                for (const auto& position :
+                     world.rods[0].defaultState.positions) {
+                    initialThreadPositions.push_back({
+                        position[0], position[1], position[2],
+                    });
+                }
+                std::vector<Vec3> initialTissuePositions;
+                initialTissuePositions.reserve(tissueWorld.fem.nodes.size());
+                for (const NMFEMNodeStateGPU& node : tissueWorld.fem.nodes) {
+                    initialTissuePositions.push_back(
+                        vector(node.positionAndMass)
+                    );
+                }
+                writePerfusedSutureVisualState(
+                    options.stateOutputDirectory,
+                    "pre-entry",
+                    0u,
+                    0.0,
+                    entryTimestepSeconds,
+                    world,
+                    tissueWorld,
+                    tissueCoupon,
+                    world.defaultSceneBodies.at(0u),
+                    initialThreadPositions,
+                    initialTissuePositions,
+                    {}
+                );
+            }
             efforts = interpolateTargets(
                 world.model,
                 targetStart,
@@ -11631,7 +12029,7 @@ int main(const int argc, const char* const argv[]) {
                 efforts,
                 1u
             );
-            const PhaseResult coupled = initializePhaseUnchecked(
+            PhaseResult coupled = initializePhaseUnchecked(
                 context,
                 compiled,
                 world,
@@ -11772,8 +12170,148 @@ int main(const int argc, const char* const argv[]) {
                 }
                 throw std::runtime_error(failure);
             }
-            const numi::matter::RuntimeStateSnapshot snapshot =
+            std::uint32_t entryApproachSteps = 1u;
+            double entryApproachGpuMilliseconds =
+                coupled.diagnostics.gpuElapsedMilliseconds;
+            numi::matter::RuntimeStateSnapshot snapshot =
                 tissueRuntime.snapshot();
+            if (perfusedTissueCurvedPullThroughOnly) {
+                require(
+                    tissueNeedleOrbit.has_value() &&
+                        tissueNeedleAngularSpeedRadPerS > 0.0,
+                    "perfused entry approach lost its curved needle orbit"
+                );
+                const double baseMatterTimestepSeconds =
+                    stepConfig.timestepSeconds;
+                while (entryApproachSteps <
+                       kPerfusedPunctureMaximumApproachSteps) {
+                    const std::uint32_t channels =
+                        static_cast<std::uint32_t>(std::ranges::count_if(
+                            snapshot.punctureChannels,
+                            [](const NMPunctureChannelGPU& channel) {
+                                return (channel.identity.w &
+                                    NM_TOPOLOGY_ACTIVE) != 0u;
+                            }
+                        ));
+                    if (channels != 0u) {
+                        break;
+                    }
+                    std::vector<MRBodyStateGPU> kinematicTargets;
+                    kinematicTargets.reserve(compiled.sceneBodyCount());
+                    const double targetAngle =
+                        tissueNeedleAngularSpeedRadPerS *
+                        baseMatterTimestepSeconds *
+                        static_cast<double>(entryApproachSteps);
+                    for (std::size_t sceneBody = 0u;
+                         sceneBody < compiled.sceneBodyCount();
+                         ++sceneBody) {
+                        kinematicTargets.push_back(
+                            sceneBody == 0u
+                                ? curvedNeedleTarget(
+                                    world.defaultSceneBodies[0],
+                                    *tissueNeedleOrbit,
+                                    targetAngle,
+                                    tissueNeedleAngularSpeedRadPerS
+                                )
+                                : world.defaultSceneBodies.at(sceneBody)
+                        );
+                    }
+                    const std::vector<float> approachEfforts =
+                        interpolateTargets(
+                            world.model,
+                            targetStart,
+                            targetStart,
+                            1u
+                        );
+                    coupled = continuePhaseWithKinematicTargets(
+                        context,
+                        compiled,
+                        stepConfig,
+                        resident,
+                        approachEfforts,
+                        kinematicTargets,
+                        1u,
+                        "perfused pre-puncture dimpling"
+                    );
+                    ++entryApproachSteps;
+                    entryApproachGpuMilliseconds +=
+                        coupled.diagnostics.gpuElapsedMilliseconds;
+                    snapshot = tissueRuntime.snapshot();
+                    require(
+                        snapshot.available,
+                        "perfused pre-puncture approach did not publish state"
+                    );
+                    if (perfusedTissueCurvedPullThroughOnly &&
+                        !options.stateOutputDirectory.empty() &&
+                        (entryApproachSteps % 16u == 0u)) {
+                        std::vector<Vec3> approachThreadPositions;
+                        approachThreadPositions.reserve(
+                            coupled.result.finalRodNodes.size()
+                        );
+                        for (const MRRodNodeStateGPU& node :
+                             coupled.result.finalRodNodes) {
+                            approachThreadPositions.push_back(
+                                vector(node.position)
+                            );
+                        }
+                        std::vector<Vec3> approachTissuePositions;
+                        approachTissuePositions.reserve(
+                            tissueCoupon.metadata.nodeCount
+                        );
+                        for (std::size_t node = 0u;
+                             node < tissueCoupon.metadata.nodeCount;
+                             ++node) {
+                            approachTissuePositions.push_back(vector(
+                                snapshot.femNodes.at(node).positionAndMass
+                            ));
+                        }
+                        writePerfusedSutureVisualState(
+                            options.stateOutputDirectory,
+                            "approach-step-" +
+                                std::to_string(entryApproachSteps),
+                            entryApproachSteps,
+                            static_cast<double>(entryApproachSteps) *
+                                entryTimestepSeconds,
+                            entryTimestepSeconds,
+                            world,
+                            tissueWorld,
+                            tissueCoupon,
+                            coupled.result.finalSceneBodies.at(0u),
+                            approachThreadPositions,
+                            approachTissuePositions,
+                            snapshot.punctureChannels,
+                            snapshot.rigidStates
+                        );
+                    }
+                    double approachNormalImpulseNs = 0.0;
+                    double approachMinimumSeparationM =
+                        std::numeric_limits<double>::infinity();
+                    for (const NMContactSampleGPU& sample :
+                         snapshot.contactSamples) {
+                        if ((sample.identity.w & NM_CONTACT_VALID) == 0u) {
+                            continue;
+                        }
+                        approachNormalImpulseNs +=
+                            sample.impulseAndNormal.w;
+                        approachMinimumSeparationM = std::min(
+                            approachMinimumSeparationM,
+                            static_cast<double>(
+                                sample.pointAndSeparation.w
+                            )
+                        );
+                    }
+                    std::cout << std::setprecision(9)
+                        << "perfused_puncture_approach_steps="
+                        << entryApproachSteps
+                        << " normal_impulse_ns="
+                        << approachNormalImpulseNs
+                        << " minimum_separation_m="
+                        << approachMinimumSeparationM
+                        << " gpu_ms="
+                        << coupled.diagnostics.gpuElapsedMilliseconds
+                        << '\n';
+                }
+            }
             require(
                 snapshot.available && !snapshot.reactions.empty() &&
                     !snapshot.femNodes.empty() &&
@@ -11787,6 +12325,11 @@ int main(const int argc, const char* const argv[]) {
             std::uint32_t activeSutureStrandContacts = 0u;
             double normalImpulse = 0.0;
             double punctureTipNormalImpulse = 0.0;
+            double punctureTipAcceptedNormalImpulse = 0.0;
+            double punctureTipDualAreaM2 = 0.0;
+            double punctureTipNormalTractionPa = 0.0;
+            double punctureTipAcceptedNormalTractionPa = 0.0;
+            double punctureCohesiveStrengthPa = 0.0;
             double sutureStrandNormalImpulse = 0.0;
             double maximumContactSpecificImpulseMps = 0.0;
             double minimumContactNodeMassKg =
@@ -11797,8 +12340,11 @@ int main(const int argc, const char* const argv[]) {
                 std::numeric_limits<double>::infinity();
             double minimumAdmissionNormalVelocity =
                 std::numeric_limits<double>::infinity();
-            for (const NMContactSampleGPU& sample :
-                 snapshot.contactSamples) {
+            for (std::size_t contactIndex = 0u;
+                 contactIndex < snapshot.contactSamples.size();
+                 ++contactIndex) {
+                const NMContactSampleGPU& sample =
+                    snapshot.contactSamples[contactIndex];
                 if ((sample.identity.w & NM_CONTACT_VALID) == 0u) {
                     continue;
                 }
@@ -11813,6 +12359,43 @@ int main(const int argc, const char* const argv[]) {
                         ++activePunctureTipContacts;
                         punctureTipNormalImpulse +=
                             sample.impulseAndNormal.w;
+                        if (contactIndex <
+                            snapshot.contactHistories.size()) {
+                            punctureTipAcceptedNormalImpulse +=
+                                snapshot.contactHistories[contactIndex].w;
+                        }
+                        const auto& proxy =
+                            tissueWorld.contact.rigidProxies[
+                                sample.identity.y];
+                        if (sample.identity.x >=
+                                tissueWorld.dispatch.gridNodeCount &&
+                            proxy.materialIndex <
+                                tissueWorld.materials.size() &&
+                            proxy.materialIndex <
+                                tissueWorld.mixedMaterials.size()) {
+                            const std::uint32_t femNode =
+                                sample.identity.x -
+                                tissueWorld.dispatch.gridNodeCount;
+                            if (femNode < snapshot.femNodes.size()) {
+                                const double inverseMass =
+                                    snapshot.femNodes[femNode]
+                                        .velocityAndInverseMass.w;
+                                const double density =
+                                    tissueWorld.materials[
+                                        proxy.materialIndex].bulk.x;
+                                const double surfaceDepth =
+                                    tissueWorld.objects[0].fidelity.x;
+                                if (inverseMass > 0.0 && density > 0.0 &&
+                                    surfaceDepth > 0.0) {
+                                    punctureTipDualAreaM2 += 1.0 /
+                                        (inverseMass * density *
+                                            surfaceDepth);
+                                }
+                                punctureCohesiveStrengthPa =
+                                    tissueWorld.mixedMaterials[
+                                        proxy.materialIndex].coupling.z;
+                            }
+                        }
                     }
                     if ((proxyFlags & NM_RIGID_SUTURE_STRAND) != 0u) {
                         ++activeSutureStrandContacts;
@@ -11855,6 +12438,15 @@ int main(const int argc, const char* const argv[]) {
                 );
             }
             const NMRigidReactionGPU& reaction = snapshot.reactions[0];
+            if (punctureTipDualAreaM2 > 0.0) {
+                const double impulseAreaTime =
+                    punctureTipDualAreaM2 *
+                    tissueRuntime.timestepSeconds();
+                punctureTipNormalTractionPa =
+                    punctureTipNormalImpulse / impulseAreaTime;
+                punctureTipAcceptedNormalTractionPa =
+                    punctureTipAcceptedNormalImpulse / impulseAreaTime;
+            }
             const Vec3 reactionImpulse{
                 reaction.impulseAndCount.x,
                 reaction.impulseAndCount.y,
@@ -12061,18 +12653,7 @@ int main(const int argc, const char* const argv[]) {
                 acceptedStateHash, coupled.result.finalRodNodes);
             appendStateHash(
                 acceptedStateHash, coupled.result.finalRodEdges);
-            appendStateHash(acceptedStateHash, snapshot.femNodes);
-            appendStateHash(acceptedStateHash, snapshot.femFields);
-            appendStateHash(
-                acceptedStateHash, snapshot.femTopologyTetrahedra);
-            appendStateHash(
-                acceptedStateHash, snapshot.punctureChannels);
-            appendStateHash(
-                acceptedStateHash, snapshot.topologyStates);
-            appendStateHash(acceptedStateHash, snapshot.reactions);
-            appendStateHash(acceptedStateHash, snapshot.contactSamples);
-            appendStateHash(
-                acceptedStateHash, snapshot.solverCertificates);
+            appendMatterStateHash(acceptedStateHash, snapshot);
             if (tissuePunctureOnly) {
                 std::cout << std::setprecision(17)
                     << "tissue_entry_contact normal_impulse_ns="
@@ -12081,6 +12662,16 @@ int main(const int argc, const char* const argv[]) {
                     << activePunctureTipContacts
                     << " puncture_tip_impulse_ns="
                     << punctureTipNormalImpulse
+                    << " puncture_tip_accepted_impulse_ns="
+                    << punctureTipAcceptedNormalImpulse
+                    << " puncture_tip_dual_area_m2="
+                    << punctureTipDualAreaM2
+                    << " puncture_tip_normal_traction_pa="
+                    << punctureTipNormalTractionPa
+                    << " puncture_tip_accepted_normal_traction_pa="
+                    << punctureTipAcceptedNormalTractionPa
+                    << " puncture_cohesive_strength_pa="
+                    << punctureCohesiveStrengthPa
                     << " suture_strand_contacts="
                     << activeSutureStrandContacts
                     << " suture_strand_impulse_ns="
@@ -12089,7 +12680,7 @@ int main(const int argc, const char* const argv[]) {
                     << maximumContactSpecificImpulseMps
                     << " minimum_contact_node_mass_kg="
                     << minimumContactNodeMassKg
-                    << " absolute_threshold_ns="
+                    << " legacy_absolute_threshold_ns="
                     << kPunctureImpulseThresholdNs << '\n';
             }
             if (tissueRestOnly) {
@@ -12149,6 +12740,17 @@ int main(const int argc, const char* const argv[]) {
                         std::to_string(maximumRelativeCorrection)
                 );
             } else if (tissuePunctureOnly) {
+                const bool cohesivePuncture =
+                    tissueCoupon.object.mutationPolicy.cohesivePuncture;
+                const bool punctureAdmissionAccepted = cohesivePuncture
+                    ? punctureTipDualAreaM2 > 0.0 &&
+                        punctureCohesiveStrengthPa > 0.0 &&
+                        punctureTipNormalTractionPa >=
+                            punctureCohesiveStrengthPa &&
+                        punctureTipAcceptedNormalTractionPa >=
+                            punctureCohesiveStrengthPa
+                    : punctureTipNormalImpulse >=
+                        kPunctureImpulseThresholdNs;
                 require(
                     tissueWorld.contact.rigidProxies.size() ==
                         ((tissueCurvedPassageOnly ||
@@ -12163,7 +12765,7 @@ int main(const int argc, const char* const argv[]) {
                         acceptedChannel != nullptr &&
                         activeTetrahedra ==
                             tissueCoupon.metadata.tetrahedronCount &&
-                        (!perfusedTissuePunctureOnly ||
+                        (!perfusedTissuePuncture ||
                          activeMaterialTetrahedra ==
                             tissueAuthoredMaterialTetrahedra) &&
                         removedMassKg == 0.0 &&
@@ -12179,8 +12781,7 @@ int main(const int argc, const char* const argv[]) {
                         channelAxisAlignment >= 0.999 &&
                         activeContacts >= 1u &&
                         activePunctureTipContacts >= 1u &&
-                        punctureTipNormalImpulse >=
-                            kPunctureImpulseThresholdNs &&
+                        punctureAdmissionAccepted &&
                         std::isfinite(minimumContactSeparation) &&
                         minimumContactSeparation > 0.0 &&
                         std::isfinite(minimumAdmissionNormalVelocity) &&
@@ -12217,6 +12818,20 @@ int main(const int argc, const char* const argv[]) {
                         std::to_string(activePunctureTipContacts) +
                         " puncture_tip_impulse=" +
                         std::to_string(punctureTipNormalImpulse) +
+                        " puncture_tip_accepted_impulse=" +
+                        std::to_string(
+                            punctureTipAcceptedNormalImpulse
+                        ) +
+                        " puncture_tip_dual_area=" +
+                        std::to_string(punctureTipDualAreaM2) +
+                        " puncture_tip_normal_traction=" +
+                        std::to_string(punctureTipNormalTractionPa) +
+                        " puncture_tip_accepted_normal_traction=" +
+                        std::to_string(
+                            punctureTipAcceptedNormalTractionPa
+                        ) +
+                        " puncture_cohesive_strength=" +
+                        std::to_string(punctureCohesiveStrengthPa) +
                         " minimum_contact_separation=" +
                         std::to_string(minimumContactSeparation) +
                         " minimum_contact_normal_velocity=" +
@@ -12239,31 +12854,73 @@ int main(const int argc, const char* const argv[]) {
                         std::to_string(minimumDeterminant) +
                         " swage_error=" + std::to_string(swageError)
                 );
+                if (perfusedTissueCurvedPullThroughOnly &&
+                    !options.stateOutputDirectory.empty()) {
+                    std::vector<Vec3> entryThreadPositions;
+                    entryThreadPositions.reserve(
+                        coupled.result.finalRodNodes.size()
+                    );
+                    for (const MRRodNodeStateGPU& node :
+                         coupled.result.finalRodNodes) {
+                        entryThreadPositions.push_back(vector(node.position));
+                    }
+                    std::vector<Vec3> entryTissuePositions;
+                    entryTissuePositions.reserve(
+                        tissueCoupon.metadata.nodeCount
+                    );
+                    for (std::size_t node = 0u;
+                         node < tissueCoupon.metadata.nodeCount;
+                         ++node) {
+                        entryTissuePositions.push_back(vector(
+                            snapshot.femNodes.at(node).positionAndMass
+                        ));
+                    }
+                    writePerfusedSutureVisualState(
+                        options.stateOutputDirectory,
+                        "puncture-accepted",
+                        entryApproachSteps,
+                        static_cast<double>(entryApproachSteps) *
+                            entryTimestepSeconds,
+                        stepConfig.timestepSeconds,
+                        world,
+                        tissueWorld,
+                        tissueCoupon,
+                        coupled.result.finalSceneBodies.at(0u),
+                        entryThreadPositions,
+                        entryTissuePositions,
+                        snapshot.punctureChannels,
+                        snapshot.rigidStates
+                    );
+                }
                 const NeedleTipCapsuleGeometry entryTip =
                     needleTipCapsuleGeometry(
                         needleForPlacement,
                         coupled.result.finalSceneBodies.at(0u)
                     );
+                const std::uint32_t postEntryMatterRateMultiplier =
+                    kSuturePassageMatterRateMultiplier;
                 const auto selectPostEntryCadence = [&] {
                     require(
                         tissueRuntime.setCoupledTimestepMultiplier(
-                            kSuturePassageMatterRateMultiplier
+                            postEntryMatterRateMultiplier
                         ),
                         "accepted Matter state could not switch to the "
                         "post-entry DER grouping"
                     );
                     stepConfig.timestepSeconds = static_cast<float>(
                         (kControlTimestep /
-                            static_cast<double>(kPhysicsSubsteps)) *
+                            static_cast<double>(kPhysicsSubsteps) /
+                            static_cast<double>(
+                                tissueEntryTemporalRefinement)) *
                         static_cast<double>(
-                            kSuturePassageMatterRateMultiplier
+                            postEntryMatterRateMultiplier
                         )
                     );
                     stepConfig.physicsSubsteps =
-                        kSuturePassageMatterRateMultiplier;
+                        postEntryMatterRateMultiplier;
                     require(
                         tissueRuntime.coupledTimestepMultiplier() ==
-                                kSuturePassageMatterRateMultiplier &&
+                                postEntryMatterRateMultiplier &&
                             tissueRuntime.timestepSeconds() ==
                                 stepConfig.timestepSeconds,
                         "post-entry Matter and MetalWorld cadences diverged"
@@ -12439,7 +13096,7 @@ int main(const int argc, const char* const argv[]) {
                     std::cout << std::setprecision(9)
                         << "tissue_suture_cadence_transition=ok"
                         << " multiplier="
-                        << kSuturePassageMatterRateMultiplier
+                        << postEntryMatterRateMultiplier
                         << " grouped_timestep_s="
                         << stepConfig.timestepSeconds
                         << " needle_tip_advance_m=" << cadenceTipAdvanceM
@@ -12532,7 +13189,10 @@ int main(const int argc, const char* const argv[]) {
                     const double entryAngleRad =
                         tissueNeedleAngularSpeedRadPerS *
                         (kControlTimestep /
-                            static_cast<double>(kPhysicsSubsteps));
+                            static_cast<double>(kPhysicsSubsteps) /
+                            static_cast<double>(
+                                tissueEntryTemporalRefinement)) *
+                        static_cast<double>(entryApproachSteps);
                     const double anglePerPassageStepRad =
                         tissueNeedleAngularSpeedRadPerS *
                         passageStepSeconds;
@@ -12561,9 +13221,12 @@ int main(const int argc, const char* const argv[]) {
                     std::uint32_t completedPassageSteps = 0u;
                     std::uint32_t totalPassageSteps = 0u;
                     double passageGpuMilliseconds =
-                        coupled.diagnostics.gpuElapsedMilliseconds;
+                        entryApproachGpuMilliseconds;
                     bool measuredExitReached = false;
                     while (completedPassageSteps < maximumPassageSteps) {
+                        // Keep the exact target sequence device-batched. A
+                        // completion snapshot grades each bounded arc chunk;
+                        // it does not fan one host submission per microstep.
                         std::uint32_t chunkSteps = std::min(
                             kCurvedPassageChunkSteps,
                             maximumPassageSteps - completedPassageSteps
@@ -12641,7 +13304,13 @@ int main(const int argc, const char* const argv[]) {
                             << " chunk_gpu_ms="
                             << passage.diagnostics.gpuElapsedMilliseconds
                             << '\n';
-                        if (completedPassageSteps < minimumPassageSteps) {
+                        const bool inspectDistalClearance =
+                            completedPassageSteps >= minimumPassageSteps;
+                        const bool savePassageFrame =
+                            !options.stateOutputDirectory.empty() &&
+                            (completedPassageSteps % 64u == 0u ||
+                             completedPassageSteps == minimumPassageSteps);
+                        if (!inspectDistalClearance && !savePassageFrame) {
                             continue;
                         }
                         const numi::matter::RuntimeStateSnapshot
@@ -12652,6 +13321,55 @@ int main(const int argc, const char* const argv[]) {
                                     progressSnapshot.femNodes.size(),
                             "curved passage could not inspect distal clearance"
                         );
+                        if (savePassageFrame) {
+                            std::vector<Vec3> passageThreadPositions;
+                            passageThreadPositions.reserve(
+                                passage.result.finalRodNodes.size()
+                            );
+                            for (const MRRodNodeStateGPU& node :
+                                 passage.result.finalRodNodes) {
+                                passageThreadPositions.push_back(
+                                    vector(node.position)
+                                );
+                            }
+                            std::vector<Vec3> passageTissuePositions;
+                            passageTissuePositions.reserve(
+                                tissueCoupon.metadata.nodeCount
+                            );
+                            for (std::size_t node = 0u;
+                                 node < tissueCoupon.metadata.nodeCount;
+                                 ++node) {
+                                passageTissuePositions.push_back(vector(
+                                    progressSnapshot.femNodes.at(node)
+                                        .positionAndMass
+                                ));
+                            }
+                            writePerfusedSutureVisualState(
+                                options.stateOutputDirectory,
+                                "passage-step-" +
+                                    std::to_string(
+                                        completedPassageSteps
+                                    ),
+                                entryApproachSteps +
+                                    completedPassageSteps,
+                                static_cast<double>(entryApproachSteps) *
+                                        entryTimestepSeconds +
+                                    static_cast<double>(completedPassageSteps) *
+                                        passageStepSeconds,
+                                passageStepSeconds,
+                                world,
+                                tissueWorld,
+                                tissueCoupon,
+                                passage.result.finalSceneBodies.at(0u),
+                                passageThreadPositions,
+                                passageTissuePositions,
+                                progressSnapshot.punctureChannels,
+                                progressSnapshot.rigidStates
+                            );
+                        }
+                        if (!inspectDistalClearance) {
+                            continue;
+                        }
                         double progressBottomProjection =
                             std::numeric_limits<double>::infinity();
                         for (std::size_t nodeIndex = 0u;
@@ -12700,9 +13418,13 @@ int main(const int argc, const char* const argv[]) {
                             !passageSnapshot.solverCertificates.empty(),
                         "curved passage did not publish accepted Matter state"
                     );
+                    const TissueFieldMetrics passageFields =
+                        tissueFieldMetrics(passageSnapshot.femFields);
                     std::vector<NMPunctureChannelGPU> passageChannels;
                     std::uint32_t passageContacts = 0u;
                     std::uint32_t passageTetrahedra = 0u;
+                    std::array<std::uint32_t, 4>
+                        passageMaterialTetrahedra{};
                     double passageRemovedMassKg = 0.0;
                     double finalBottomProjection =
                         std::numeric_limits<double>::infinity();
@@ -12755,8 +13477,14 @@ int main(const int argc, const char* const argv[]) {
                     }
                     for (const NMTetrahedronGPU& tetrahedron :
                          passageSnapshot.femTopologyTetrahedra) {
-                        passageTetrahedra +=
+                        const bool active =
                             (tetrahedron.identity.w & NM_OBJECT_ACTIVE) != 0u;
+                        passageTetrahedra += active;
+                        if (active && tetrahedron.identity.x <
+                            passageMaterialTetrahedra.size()) {
+                            ++passageMaterialTetrahedra[
+                                tetrahedron.identity.x];
+                        }
                     }
                     for (const NMFEMTopologyStateGPU& topology :
                          passageSnapshot.topologyStates) {
@@ -12958,37 +13686,8 @@ int main(const int argc, const char* const argv[]) {
                         passageStateHash,
                         passage.result.finalRodEdges
                     );
-                    appendStateHash(
-                        passageStateHash,
-                        passageSnapshot.femNodes
-                    );
-                    appendStateHash(
-                        passageStateHash,
-                        passageSnapshot.femFields
-                    );
-                    appendStateHash(
-                        passageStateHash,
-                        passageSnapshot.femTopologyTetrahedra
-                    );
-                    appendStateHash(
-                        passageStateHash,
-                        passageSnapshot.punctureChannels
-                    );
-                    appendStateHash(
-                        passageStateHash,
-                        passageSnapshot.topologyStates
-                    );
-                    appendStateHash(
-                        passageStateHash,
-                        passageSnapshot.reactions
-                    );
-                    appendStateHash(
-                        passageStateHash,
-                        passageSnapshot.contactSamples
-                    );
-                    appendStateHash(
-                        passageStateHash,
-                        passageSnapshot.solverCertificates
+                    appendMatterStateHash(
+                        passageStateHash, passageSnapshot
                     );
                     const std::uint32_t minimumWallChannels =
                         static_cast<std::uint32_t>(std::ceil(
@@ -13016,7 +13715,14 @@ int main(const int argc, const char* const argv[]) {
                             channelTotalLengthM >= authoredWallThicknessM &&
                             passageTetrahedra ==
                                 tissueCoupon.metadata.tetrahedronCount &&
+                            (!perfusedTissuePuncture ||
+                             passageMaterialTetrahedra ==
+                                tissueAuthoredMaterialTetrahedra) &&
                             passageRemovedMassKg == 0.0 &&
+                            passageFields.finite &&
+                            passageFields.minimumTemperatureK > 0.0 &&
+                            passageFields.minimumActivation >= 0.0 &&
+                            passageFields.maximumActivation <= 1.0 &&
                             passageCertificatesAccepted &&
                             std::isfinite(passageMinimumDeterminant) &&
                             passageMinimumDeterminant > 0.0 &&
@@ -13080,12 +13786,34 @@ int main(const int argc, const char* const argv[]) {
                             std::to_string(passageContacts) +
                             " active_tetrahedra=" +
                             std::to_string(passageTetrahedra) +
+                            " active_material_tetrahedra=" +
+                            materialTetrahedronSummary(
+                                passageMaterialTetrahedra
+                            ) +
+                            " authored_material_tetrahedra=" +
+                            materialTetrahedronSummary(
+                                tissueAuthoredMaterialTetrahedra
+                            ) +
                             " authored_tetrahedra=" +
                             std::to_string(
                                 tissueCoupon.metadata.tetrahedronCount
                             ) +
                             " removed_mass=" +
                             std::to_string(passageRemovedMassKg) +
+                            " pore_pressure_range=" +
+                            std::to_string(
+                                passageFields.minimumPorePressurePa
+                            ) + "," +
+                            std::to_string(
+                                passageFields.maximumPorePressurePa
+                            ) +
+                            " activation_range=" +
+                            std::to_string(
+                                passageFields.minimumActivation
+                            ) + "," +
+                            std::to_string(
+                                passageFields.maximumActivation
+                            ) +
                             " certificates_accepted=" +
                             std::to_string(passageCertificatesAccepted) +
                             " minimum_determinant=" +
@@ -13116,13 +13844,15 @@ int main(const int argc, const char* const argv[]) {
                             std::to_string(qualifiedTransitionRod(passageRod))
                     );
                     std::cout << std::setprecision(9)
-                        << "tissue_curved_through_wall_passage=ok"
+                        << (perfusedTissueCurvedPullThroughOnly
+                            ? "perfused_tissue_curved_through_wall_passage=ok"
+                            : "tissue_curved_through_wall_passage=ok")
                         << " passage_groups=" << totalPassageSteps
                         << " matter_timestep_multiplier="
-                        << kSuturePassageMatterRateMultiplier
-                        << " base_der_substeps="
-                        << 1u + totalPassageSteps *
-                            kSuturePassageMatterRateMultiplier
+                        << postEntryMatterRateMultiplier
+                        << " matter_microsteps="
+                        << entryApproachSteps + totalPassageSteps *
+                            postEntryMatterRateMultiplier
                         << " needle_arc_angle_rad="
                         << entryAngleRad +
                             anglePerPassageStepRad * totalPassageSteps
@@ -13145,8 +13875,25 @@ int main(const int argc, const char* const argv[]) {
                             channelMinimumSignedOrbitErrorM
                         << " active_contacts=" << passageContacts
                         << " active_tetrahedra=" << passageTetrahedra
+                        << " active_material_tetrahedra="
+                        << materialTetrahedronSummary(
+                            passageMaterialTetrahedra
+                        )
                         << " removed_tissue_mass_kg="
                         << passageRemovedMassKg
+                        << " mechanical_pressure_range_pa="
+                        << passageFields.minimumMechanicalPressurePa
+                        << ','
+                        << passageFields.maximumMechanicalPressurePa
+                        << " pore_pressure_range_pa="
+                        << passageFields.minimumPorePressurePa
+                        << ',' << passageFields.maximumPorePressurePa
+                        << " activation_range="
+                        << passageFields.minimumActivation
+                        << ',' << passageFields.maximumActivation
+                        << " temperature_range_k="
+                        << passageFields.minimumTemperatureK
+                        << ',' << passageFields.maximumTemperatureK
                         << " maximum_tissue_displacement_m="
                         << maximumPassageTissueDisplacementM
                         << " matter_minimum_determinant="
@@ -13232,6 +13979,7 @@ int main(const int argc, const char* const argv[]) {
                         -std::numeric_limits<double>::infinity();
                     double maximumStrandProjectionErrorM = 0.0;
                     double sampledStrandReactionImpulseNs = 0.0;
+                    double maximumSampledStrandReactionForceN = 0.0;
                     std::uint32_t sampledStrandContacts = 0u;
                     double minimumStrandContactChannelDistanceM =
                         std::numeric_limits<double>::infinity();
@@ -13240,11 +13988,47 @@ int main(const int argc, const char* const argv[]) {
                     double pullMaximumResidual = 0.0;
                     double pullMaximumTissueDisplacementM = 0.0;
                     std::uint32_t pullMaximumFGMRESIterations = 0u;
+                    const numi::matter::SolverIterationBudgets
+                        authoredPullSolverBudgets =
+                            tissueRuntime.solverIterationBudgets();
+                    const numi::matter::SolverIterationBudgets
+                        diagnosticPullSolverBudgets{
+                            .newtonIterations = std::max(
+                                authoredPullSolverBudgets.newtonIterations,
+                                32u
+                            ),
+                            .fgmresIterations = std::max(
+                                authoredPullSolverBudgets.fgmresIterations,
+                                256u
+                            ),
+                        };
+                    require(
+                        authoredPullSolverBudgets.newtonIterations != 0u &&
+                            authoredPullSolverBudgets.fgmresIterations != 0u,
+                        "pull-through has no authored solver budget"
+                    );
+                    std::uint32_t pullSolverBudgetRetries = 0u;
+                    double pullSolverBudgetRetryGpuMilliseconds = 0.0;
                     constexpr std::uint32_t kPullChunkSteps = 8u;
+                    // The first full-resolution run localized a deterministic
+                    // rejection immediately after step 2008. Keep the normal
+                    // device-batched path everywhere else, but submit one
+                    // control step at a time across this bounded diagnostic
+                    // window so the completion snapshot retains the exact
+                    // Matter failure record rather than a later recovered
+                    // control step's status.
+                    constexpr std::uint32_t kPullDiagnosticFirstStep = 1984u;
+                    constexpr std::uint32_t kPullDiagnosticLastStep = 2032u;
                     numi::matter::RuntimeStateSnapshot pullSnapshot;
                     while (completedPullSteps < maximumPullSteps) {
+                        // Pull-through retains a shorter diagnostic batch so
+                        // the first accepted strand/channel interaction is
+                        // localized without returning to per-step fanout.
+                        const bool diagnosticWindow =
+                            completedPullSteps >= kPullDiagnosticFirstStep &&
+                            completedPullSteps < kPullDiagnosticLastStep;
                         const std::uint32_t chunkSteps = std::min(
-                            kPullChunkSteps,
+                            diagnosticWindow ? 1u : kPullChunkSteps,
                             maximumPullSteps - completedPullSteps
                         );
                         std::vector<MRBodyStateGPU> kinematicTargets;
@@ -13281,7 +14065,8 @@ int main(const int argc, const char* const argv[]) {
                                 targetStart,
                                 chunkSteps
                             );
-                        passage = continuePhaseWithKinematicTargets(
+                        passage =
+                            continuePhaseWithKinematicTargetsUnchecked(
                             context,
                             compiled,
                             stepConfig,
@@ -13291,10 +14076,195 @@ int main(const int argc, const char* const argv[]) {
                             chunkSteps,
                             "needle-and-suture tissue pull-through"
                         );
-                        completedPullSteps += chunkSteps;
                         pullGpuMilliseconds +=
                             passage.diagnostics.gpuElapsedMilliseconds;
                         pullSnapshot = tissueRuntime.snapshot();
+                        const bool exhaustedAuthoredLinearBudget =
+                            chunkSteps == 1u &&
+                            !passage.diagnostics.succeeded() &&
+                            passage.diagnostics.failedStepCount == 1u &&
+                            pullSnapshot.available &&
+                            !pullSnapshot.statuses.empty() &&
+                            pullSnapshot.statuses[0].code ==
+                                NM_STATUS_NONLINEAR_SOLVER_FAILURE &&
+                            pullSnapshot.statuses[0].fgmresIterations >=
+                                authoredPullSolverBudgets.fgmresIterations;
+                        if (exhaustedAuthoredLinearBudget &&
+                            pullSolverBudgetRetries == 0u) {
+                            const NMMatterStatusGPU initialFailure =
+                                pullSnapshot.statuses[0];
+                            require(
+                                tissueRuntime.setSolverIterationBudgets(
+                                    diagnosticPullSolverBudgets
+                                ),
+                                "pull-through could not install bounded "
+                                "diagnostic solver budgets"
+                            );
+                            std::cout
+                                << "suture_pull_through_solver_budget_retry="
+                                << (completedPullSteps + 1u)
+                                << " authored_newton_iterations="
+                                << authoredPullSolverBudgets.newtonIterations
+                                << " authored_fgmres_iterations="
+                                << authoredPullSolverBudgets.fgmresIterations
+                                << " diagnostic_newton_iterations="
+                                << diagnosticPullSolverBudgets.newtonIterations
+                                << " diagnostic_fgmres_iterations="
+                                << diagnosticPullSolverBudgets.fgmresIterations
+                                << " rejected_fgmres_iterations="
+                                << initialFailure.fgmresIterations
+                                << " rejected_diagnostics=("
+                                << initialFailure.diagnostics.x << ','
+                                << initialFailure.diagnostics.y << ','
+                                << initialFailure.diagnostics.z << ','
+                                << initialFailure.diagnostics.w << ")\n";
+                            PhaseResult retry =
+                                continuePhaseWithKinematicTargetsUnchecked(
+                                    context,
+                                    compiled,
+                                    stepConfig,
+                                    resident,
+                                    pullEfforts,
+                                    kinematicTargets,
+                                    chunkSteps,
+                                    "needle-and-suture tissue pull-through "
+                                    "bounded solver-budget retry"
+                                );
+                            pullGpuMilliseconds +=
+                                retry.diagnostics.gpuElapsedMilliseconds;
+                            pullSolverBudgetRetryGpuMilliseconds +=
+                                retry.diagnostics.gpuElapsedMilliseconds;
+                            ++pullSolverBudgetRetries;
+                            pullSnapshot = tissueRuntime.snapshot();
+                            require(
+                                tissueRuntime.setSolverIterationBudgets(
+                                    authoredPullSolverBudgets
+                                ),
+                                "pull-through could not restore authored "
+                                "solver budgets after diagnostic retry"
+                            );
+                            passage = std::move(retry);
+                        }
+                        if (!passage.diagnostics.succeeded() ||
+                            passage.diagnostics.failedStepCount != 0u) {
+                            std::string failure =
+                                "needle-and-suture tissue pull-through "
+                                "rejected a transactional step: accepted_before=" +
+                                std::to_string(completedPullSteps) +
+                                " batch_steps=" +
+                                std::to_string(chunkSteps) +
+                                " successful_control_steps=" +
+                                std::to_string(
+                                    passage.diagnostics.successfulStepCount
+                                ) +
+                                " failed_control_steps=" +
+                                std::to_string(
+                                    passage.diagnostics.failedStepCount
+                                ) +
+                                " solver_budget_retries=" +
+                                std::to_string(pullSolverBudgetRetries) +
+                                " first_failing_control_step=" +
+                                std::to_string(
+                                    passage.diagnostics
+                                        .firstFailingControlStep
+                                ) +
+                                " world_status=" +
+                                std::to_string(
+                                    passage.diagnostics.firstGPUStatusCode
+                                ) +
+                                " host_message=(" +
+                                passage.diagnostics.message + ")";
+                            if (pullSnapshot.available &&
+                                !pullSnapshot.statuses.empty()) {
+                                const NMMatterStatusGPU& status =
+                                    pullSnapshot.statuses[0];
+                                failure +=
+                                    " matter_status=" +
+                                    std::to_string(status.code) +
+                                    " object=" +
+                                    std::to_string(status.objectIndex) +
+                                    " failing_index=" +
+                                    std::to_string(status.failingIndex) +
+                                    " completed_microsteps=" +
+                                    std::to_string(
+                                        status.completedMicrosteps
+                                    ) +
+                                    " fgmres_iterations=" +
+                                    std::to_string(
+                                        status.fgmresIterations
+                                    ) +
+                                    " diagnostics=(" +
+                                    std::to_string(status.diagnostics.x) +
+                                    "," +
+                                    std::to_string(status.diagnostics.y) +
+                                    "," +
+                                    std::to_string(status.diagnostics.z) +
+                                    "," +
+                                    std::to_string(status.diagnostics.w) +
+                                    ")";
+                            }
+                            if (passage.diagnostics.firstFailingControlStep <
+                                passage.result.statuses.size()) {
+                                const MRMetalWorldStatusGPU& status =
+                                    passage.result.statuses[
+                                        passage.diagnostics
+                                            .firstFailingControlStep];
+                                failure +=
+                                    " failing_world_substep=" +
+                                    std::to_string(status.failingSubstep) +
+                                    " world_diagnostics=(" +
+                                    std::to_string(status.diagnostics.x) +
+                                    "," +
+                                    std::to_string(status.diagnostics.y) +
+                                    "," +
+                                    std::to_string(status.diagnostics.z) +
+                                    "," +
+                                    std::to_string(status.diagnostics.w) +
+                                    ")";
+                            }
+                            if (pullSnapshot.available &&
+                                !pullSnapshot.solverCertificates.empty()) {
+                                const NMSolverCertificateGPU& certificate =
+                                    pullSnapshot.solverCertificates[0];
+                                failure +=
+                                    " certificate_nonlinear=(" +
+                                    std::to_string(
+                                        certificate.nonlinear.x
+                                    ) +
+                                    "," +
+                                    std::to_string(
+                                        certificate.nonlinear.y
+                                    ) +
+                                    "," +
+                                    std::to_string(
+                                        certificate.nonlinear.z
+                                    ) +
+                                    "," +
+                                    std::to_string(
+                                        certificate.nonlinear.w
+                                    ) +
+                                    ") certificate_contact=(" +
+                                    std::to_string(certificate.contact.x) +
+                                    "," +
+                                    std::to_string(certificate.contact.y) +
+                                    "," +
+                                    std::to_string(certificate.contact.z) +
+                                    "," +
+                                    std::to_string(certificate.contact.w) +
+                                    ") certificate_transport=(" +
+                                    std::to_string(certificate.transport.x) +
+                                    "," +
+                                    std::to_string(certificate.transport.y) +
+                                    "," +
+                                    std::to_string(certificate.transport.z) +
+                                    "," +
+                                    std::to_string(certificate.transport.w) +
+                                    ") minimum_J=" +
+                                    std::to_string(certificate.validity.x);
+                            }
+                            require(false, failure);
+                        }
+                        completedPullSteps += chunkSteps;
                         require(
                             pullSnapshot.available &&
                                 tissueCoupon.metadata.nodeCount <=
@@ -13304,6 +14274,53 @@ int main(const int argc, const char* const argv[]) {
                                     pullSnapshot.rigidStates.size(),
                             "pull-through did not publish coupled tissue/strand state"
                         );
+                        if (!options.stateOutputDirectory.empty() &&
+                            (completedPullSteps % 32u == 0u ||
+                             completedPullSteps == maximumPullSteps)) {
+                            std::vector<Vec3> pullThreadPositions;
+                            pullThreadPositions.reserve(
+                                passage.result.finalRodNodes.size()
+                            );
+                            for (const MRRodNodeStateGPU& node :
+                                 passage.result.finalRodNodes) {
+                                pullThreadPositions.push_back(
+                                    vector(node.position)
+                                );
+                            }
+                            std::vector<Vec3> pullTissuePositions;
+                            pullTissuePositions.reserve(
+                                tissueCoupon.metadata.nodeCount
+                            );
+                            for (std::size_t node = 0u;
+                                 node < tissueCoupon.metadata.nodeCount;
+                                 ++node) {
+                                pullTissuePositions.push_back(vector(
+                                    pullSnapshot.femNodes.at(node)
+                                        .positionAndMass
+                                ));
+                            }
+                            writePerfusedSutureVisualState(
+                                options.stateOutputDirectory,
+                                "pull-step-" +
+                                    std::to_string(completedPullSteps),
+                                entryApproachSteps + totalPassageSteps +
+                                    completedPullSteps,
+                                static_cast<double>(entryApproachSteps) *
+                                        entryTimestepSeconds +
+                                    static_cast<double>(
+                                        totalPassageSteps + completedPullSteps
+                                    ) * stepConfig.timestepSeconds,
+                                stepConfig.timestepSeconds,
+                                world,
+                                tissueWorld,
+                                tissueCoupon,
+                                passage.result.finalSceneBodies.at(0u),
+                                pullThreadPositions,
+                                pullTissuePositions,
+                                pullSnapshot.punctureChannels,
+                                pullSnapshot.rigidStates
+                            );
+                        }
                         double currentBottomProjection =
                             std::numeric_limits<double>::infinity();
                         for (std::size_t nodeIndex = 0u;
@@ -13335,6 +14352,7 @@ int main(const int argc, const char* const argv[]) {
                                     certifiedThreadNode).position),
                                 thicknessAxis
                             ) - world.rods[0].model.radius;
+                        double currentStrandReactionImpulseNs = 0.0;
                         for (std::uint32_t edge = 0u;
                              edge < kSutureMatterContactSegmentCount;
                              ++edge) {
@@ -13359,12 +14377,19 @@ int main(const int argc, const char* const argv[]) {
                                 pullSnapshot.reactions.at(
                                     firstStrandProxy + edge
                                 );
-                            sampledStrandReactionImpulseNs += norm({
+                            currentStrandReactionImpulseNs += norm({
                                 strandReaction.impulseAndCount.x,
                                 strandReaction.impulseAndCount.y,
                                 strandReaction.impulseAndCount.z,
                             });
                         }
+                        sampledStrandReactionImpulseNs +=
+                            currentStrandReactionImpulseNs;
+                        maximumSampledStrandReactionForceN = std::max(
+                            maximumSampledStrandReactionForceN,
+                            currentStrandReactionImpulseNs /
+                                tissueRuntime.timestepSeconds()
+                        );
                         for (const NMContactSampleGPU& sample :
                              pullSnapshot.contactSamples) {
                             if ((sample.identity.w & NM_CONTACT_VALID) == 0u ||
@@ -13432,8 +14457,16 @@ int main(const int argc, const char* const argv[]) {
                             << sampledStrandContacts
                             << " sampled_strand_reaction_impulse_ns="
                             << sampledStrandReactionImpulseNs
+                            << " maximum_sampled_strand_reaction_force_n="
+                            << maximumSampledStrandReactionForceN
                             << " minimum_contact_channel_distance_m="
                             << minimumStrandContactChannelDistanceM
+                            << " matter_minimum_determinant="
+                            << pullMinimumDeterminant
+                            << " matter_maximum_residual="
+                            << pullMaximumResidual
+                            << " matter_maximum_fgmres_iterations="
+                            << pullMaximumFGMRESIterations
                             << " chunk_gpu_ms="
                             << passage.diagnostics.gpuElapsedMilliseconds
                             << '\n';
@@ -13454,6 +14487,8 @@ int main(const int argc, const char* const argv[]) {
 
                     std::uint32_t pullActiveChannels = 0u;
                     std::uint32_t pullActiveTetrahedra = 0u;
+                    std::array<std::uint32_t, 4>
+                        pullMaterialTetrahedra{};
                     double pullRemovedMassKg = 0.0;
                     for (const NMPunctureChannelGPU& channel :
                          pullSnapshot.punctureChannels) {
@@ -13462,13 +14497,21 @@ int main(const int argc, const char* const argv[]) {
                     }
                     for (const NMTetrahedronGPU& tetrahedron :
                          pullSnapshot.femTopologyTetrahedra) {
-                        pullActiveTetrahedra +=
+                        const bool active =
                             (tetrahedron.identity.w & NM_OBJECT_ACTIVE) != 0u;
+                        pullActiveTetrahedra += active;
+                        if (active && tetrahedron.identity.x <
+                            pullMaterialTetrahedra.size()) {
+                            ++pullMaterialTetrahedra[
+                                tetrahedron.identity.x];
+                        }
                     }
                     for (const NMFEMTopologyStateGPU& topology :
                          pullSnapshot.topologyStates) {
                         pullRemovedMassKg += topology.accounting.y;
                     }
+                    const TissueFieldMetrics pullFields =
+                        tissueFieldMetrics(pullSnapshot.femFields);
                     const RodStateMetrics pullRod = rodStateMetrics(
                         world,
                         passage.result
@@ -13488,21 +14531,24 @@ int main(const int argc, const char* const argv[]) {
                         pullStateHash,
                         passage.result.finalRodNodes
                     );
-                    appendStateHash(pullStateHash, pullSnapshot.femNodes);
                     appendStateHash(
                         pullStateHash,
-                        pullSnapshot.punctureChannels
+                        passage.result.finalRodEdges
                     );
-                    appendStateHash(
-                        pullStateHash,
-                        pullSnapshot.solverCertificates
-                    );
+                    appendMatterStateHash(pullStateHash, pullSnapshot);
                     require(
                         certifiedThreadClearanceReached &&
                             pullActiveChannels == passageChannels.size() &&
                             pullActiveTetrahedra ==
                                 tissueCoupon.metadata.tetrahedronCount &&
+                            (!perfusedTissuePuncture ||
+                             pullMaterialTetrahedra ==
+                                tissueAuthoredMaterialTetrahedra) &&
                             pullRemovedMassKg == 0.0 &&
+                            pullFields.finite &&
+                            pullFields.minimumTemperatureK > 0.0 &&
+                            pullFields.minimumActivation >= 0.0 &&
+                            pullFields.maximumActivation <= 1.0 &&
                             std::isfinite(pullMinimumDeterminant) &&
                             pullMinimumDeterminant > 0.0 &&
                             std::isfinite(pullMaximumResidual) &&
@@ -13510,6 +14556,10 @@ int main(const int argc, const char* const argv[]) {
                             sampledStrandContacts > 0u &&
                             std::isfinite(sampledStrandReactionImpulseNs) &&
                             sampledStrandReactionImpulseNs > 0.0 &&
+                            std::isfinite(
+                                maximumSampledStrandReactionForceN
+                            ) &&
+                            maximumSampledStrandReactionForceN > 0.0 &&
                             minimumStrandContactChannelDistanceM <=
                                 expectedChannelRadiusM +
                                     world.rods[0].model.radius +
@@ -13526,9 +14576,27 @@ int main(const int argc, const char* const argv[]) {
                             std::to_string(sampledStrandContacts) +
                             " strand_reaction=" +
                             std::to_string(sampledStrandReactionImpulseNs) +
+                            " maximum_strand_force=" +
+                            std::to_string(
+                                maximumSampledStrandReactionForceN
+                            ) +
                             " contact_channel_distance=" +
                             std::to_string(
                                 minimumStrandContactChannelDistanceM
+                            ) +
+                            " pore_pressure_range=" +
+                            std::to_string(
+                                pullFields.minimumPorePressurePa
+                            ) + "," +
+                            std::to_string(
+                                pullFields.maximumPorePressurePa
+                            ) +
+                            " activation_range=" +
+                            std::to_string(
+                                pullFields.minimumActivation
+                            ) + "," +
+                            std::to_string(
+                                pullFields.maximumActivation
                             ) +
                             " determinant=" +
                             std::to_string(pullMinimumDeterminant) +
@@ -13540,7 +14608,9 @@ int main(const int argc, const char* const argv[]) {
                             std::to_string(pullRod.maximumEdgeLengthError)
                     );
                     std::cout << std::setprecision(9)
-                        << "tissue_suture_pull_through=ok"
+                        << (perfusedTissueCurvedPullThroughOnly
+                            ? "perfused_tissue_suture_pull_through=ok"
+                            : "tissue_suture_pull_through=ok")
                         << " pull_steps=" << completedPullSteps
                         << " final_orbit_angle_rad="
                         << passageAngleRad + pullAnglePerStepRad *
@@ -13555,6 +14625,8 @@ int main(const int argc, const char* const argv[]) {
                         << sampledStrandContacts
                         << " sampled_strand_reaction_impulse_ns="
                         << sampledStrandReactionImpulseNs
+                        << " maximum_sampled_strand_reaction_force_n="
+                        << maximumSampledStrandReactionForceN
                         << " minimum_strand_contact_channel_distance_m="
                         << minimumStrandContactChannelDistanceM
                         << " strand_projection_error_m="
@@ -13563,8 +14635,24 @@ int main(const int argc, const char* const argv[]) {
                         << pullActiveChannels
                         << " active_tetrahedra="
                         << pullActiveTetrahedra
+                        << " active_material_tetrahedra="
+                        << materialTetrahedronSummary(
+                            pullMaterialTetrahedra
+                        )
                         << " removed_tissue_mass_kg="
                         << pullRemovedMassKg
+                        << " mechanical_pressure_range_pa="
+                        << pullFields.minimumMechanicalPressurePa
+                        << ',' << pullFields.maximumMechanicalPressurePa
+                        << " pore_pressure_range_pa="
+                        << pullFields.minimumPorePressurePa
+                        << ',' << pullFields.maximumPorePressurePa
+                        << " activation_range="
+                        << pullFields.minimumActivation
+                        << ',' << pullFields.maximumActivation
+                        << " temperature_range_k="
+                        << pullFields.minimumTemperatureK
+                        << ',' << pullFields.maximumTemperatureK
                         << " maximum_tissue_displacement_m="
                         << pullMaximumTissueDisplacementM
                         << " matter_minimum_determinant="
@@ -13573,6 +14661,10 @@ int main(const int argc, const char* const argv[]) {
                         << pullMaximumResidual
                         << " matter_maximum_fgmres_iterations="
                         << pullMaximumFGMRESIterations
+                        << " solver_budget_retries="
+                        << pullSolverBudgetRetries
+                        << " solver_budget_retry_gpu_ms="
+                        << pullSolverBudgetRetryGpuMilliseconds
                         << " hard_swage_root_error_m="
                         << pullSwageErrorM
                         << " thread_maximum_edge_error_m="
@@ -13583,7 +14675,8 @@ int main(const int argc, const char* const argv[]) {
                         << " pull_state_fnv64=0x" << std::hex
                         << pullStateHash << std::dec
                         << " failed_steps="
-                        << passage.diagnostics.failedStepCount << '\n';
+                        << (passage.diagnostics.failedStepCount +
+                            pullSolverBudgetRetries) << '\n';
                     return 0;
                 }
                 const std::uint32_t channelReleaseSteps =
@@ -13823,7 +14916,7 @@ int main(const int argc, const char* const argv[]) {
                             2.0 * expectedEntryTractLengthM) &&
                         releaseTetrahedra ==
                             tissueCoupon.metadata.tetrahedronCount &&
-                        (!perfusedTissuePunctureOnly ||
+                        (!perfusedTissuePuncture ||
                          releaseMaterialTetrahedra ==
                             tissueAuthoredMaterialTetrahedra) &&
                         releaseRemovedMassKg == 0.0 &&
