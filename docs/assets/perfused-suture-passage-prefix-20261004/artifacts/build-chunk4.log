@@ -1,0 +1,8 @@
+[  1%] Built target numi_matter_shaders
+[ 32%] Built target coupled_shaders
+[ 34%] Built target numi_matter_runtime_objects
+[ 42%] Built target numi_matter_compiler_objects
+[ 97%] Built target coupled_physics
+[ 98%] Building CXX object CMakeFiles/coupled_suture_handoff_probe.dir/apps/dual_psm_suture_handoff_probe.cpp.o
+[100%] Linking CXX executable bin/coupled_suture_handoff_probe
+[100%] Built target coupled_suture_handoff_probe

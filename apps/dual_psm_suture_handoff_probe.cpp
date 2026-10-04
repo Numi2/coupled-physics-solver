@@ -238,7 +238,8 @@ constexpr std::uint32_t kPunctureChannelProbeSteps = 16u;
 constexpr double kCurvedPassageSpeedMps = kPunctureApproachSpeedMps;
 constexpr double kCurvedPassageExitClearanceM = 1.0e-4;
 constexpr double kCurvedPassageMaximumExtensionM = 5.0e-4;
-constexpr std::uint32_t kCurvedPassageChunkSteps = 32u;
+// Bound device submissions so each accepted arc returns an inspectable state.
+constexpr std::uint32_t kCurvedPassageChunkSteps = 4u;
 constexpr std::uint32_t kCurvedPassageContactSegmentCount = 2u;
 // The first two 1.97 mm DER edges cover the swage, full 0.77 mm wall and both
 // free-surface approach regions during the qualified root pull-through. Keeping
@@ -13308,7 +13309,8 @@ int main(const int argc, const char* const argv[]) {
                             completedPassageSteps >= minimumPassageSteps;
                         const bool savePassageFrame =
                             !options.stateOutputDirectory.empty() &&
-                            (completedPassageSteps % 64u == 0u ||
+                            (completedPassageSteps %
+                                    kCurvedPassageChunkSteps == 0u ||
                              completedPassageSteps == minimumPassageSteps);
                         if (!inspectDistalClearance && !savePassageFrame) {
                             continue;

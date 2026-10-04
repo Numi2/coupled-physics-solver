@@ -1,0 +1,13 @@
+Sun Oct  4 11:48:53 UTC 2026
+ns-Mac-mini.local
+Darwin ns-Mac-mini.local 25.6.0 Darwin Kernel Version 25.6.0: Sat Jul 11 15:27:27 PDT 2026; root:xnu-12377.161.13~4/RELEASE_ARM64_T6041 arm64
+1ddeb40d78be1d7d7eb262adf001adea2376faf4
+ M .numi/commands/coupled-profile
+ M README.md
+ M apps/dual_psm_suture_handoff_probe.cpp
+ M matter/src/metal/fgmres.metalinc
+ M matter/src/runtime.mm
+?? scripts/
+batch_steps=4
+checkpoint_each_chunk=true
+acceptance_thresholds=unchanged

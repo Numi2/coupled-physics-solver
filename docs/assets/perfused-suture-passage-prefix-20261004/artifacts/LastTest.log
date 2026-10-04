@@ -1,0 +1,50 @@
+Start testing: Oct 04 13:48 CEST
+----------------------------------------------------------
+7/13 Testing: coupled.suture.perfused_tissue_coupling
+7/13 Test: coupled.suture.perfused_tissue_coupling
+Command: "/Users/n/numi-perfused-main-build-20261004/bin/coupled_suture_handoff_probe" "--perfused-tissue-coupling-only"
+Directory: /Users/n/numi-perfused-main-build-20261004
+"coupled.suture.perfused_tissue_coupling" start time: Oct 04 13:48 CEST
+Output:
+----------------------------------------------------------
+handoff_phase=authored_reset swage_material_frame_error_rad=0
+tissue_operative_mesh=34x40x8 tissue_operative_spacing_m=0.000111888889,0.00012048,0.0001 tissue_operative_tetrahedra=65280 tissue_operative_min_tet_volume_m3=2.09694696e-13 tissue_operative_relative_volume_error=9.14242458e-13
+tissue_contact_region=suture_strand tissue_authored_minimum_separation_m=7.5e-05 tissue_surface_offset_m=7.5e-05 tissue_anchor_node=12197 tissue_contact_nodes=590/4192 tissue_authored_capsule_first=[-0.011035,-0.005909,0.001747] tissue_authored_capsule_second=[-0.012128,-0.004274,0.001652]
+suture_reset_proximal_clearance_m=5.40299648e-06,5.81922996e-05,8.22244016e-05 suture_reset_distal_clearance_m=-0.001005403,-0.0010581923,-0.0010822244
+tissue_contact_anchor_node=12197 fixed=0 compiled_pairs=3 needle_contact_segments=1 suture_contact_segments=2 total_contact_proxies=3 self_contact=0 proxy_flags=2
+perfused_tissue_suture_coupling=ok reaction_contacts=0 final_active_contacts=8 final_normal_impulse_ns=1.8348162e-06 suture_strand_contacts=8 suture_strand_impulse_ns=1.8348162e-06 reaction_impulse_ns=[0.000000,0.000000,0.000000] needle_velocity_delta_mps=0.00261098949 thread_root_velocity_delta_mps=0.0597098697 maximum_tissue_displacement_m=3.49245965e-10 hard_swage_root_error_m=3.99603927e-06 matter_maximum_nonlinear_residual=3.62201445e-06 matter_maximum_relative_correction=0 matter_maximum_volume_residual=9.1392387e-08 matter_minimum_determinant=0.999998689 matter_maximum_fgmres_iterations=128 active_puncture_channels=0 active_tetrahedra=65280 active_material_tetrahedra=[24480,16320,16320,8160] authored_material_tetrahedra=[24480,16320,16320,8160] removed_tissue_mass_kg=0 analytic_channel_tract_mass_kg=1.5710916e-09 removed_to_channel_tract_mass_ratio=0 puncture_channel_radius_m=0 puncture_channel_length_m=0 puncture_channel_axis_alignment=0 puncture_impulse_threshold_ns=0 channel_release_contacts=0 channel_release_puncture_tip_contacts=0 channel_release_strand_contacts=0 channel_release_channels=0 channel_release_links=0 channel_release_material_tetrahedra=[0,0,0,0] channel_release_total_length_m=0 channel_release_signed_needle_motion_m=0 channel_release_minimum_determinant=0 channel_release_maximum_residual=0 channel_release_swage_error_m=0 channel_release_state_fnv64=0x0 accepted_state_fnv64=0x44eba0369cc053cf reference_gpu_ms=224.42225 coupled_gpu_ms=15312.9615 failed_steps=0
+<end of output>
+Test time =  16.16 sec
+----------------------------------------------------------
+Test Passed.
+"coupled.suture.perfused_tissue_coupling" end time: Oct 04 13:48 CEST
+"coupled.suture.perfused_tissue_coupling" time elapsed: 00:00:16
+----------------------------------------------------------
+
+8/13 Testing: coupled.suture.perfused_tissue_puncture
+8/13 Test: coupled.suture.perfused_tissue_puncture
+Command: "/Users/n/numi-perfused-main-build-20261004/bin/coupled_suture_handoff_probe" "--perfused-tissue-puncture-only"
+Directory: /Users/n/numi-perfused-main-build-20261004
+"coupled.suture.perfused_tissue_puncture" start time: Oct 04 13:48 CEST
+Output:
+----------------------------------------------------------
+handoff_phase=authored_reset swage_material_frame_error_rad=0
+tissue_contact_region=tapered_tip tissue_authored_minimum_separation_m=8.8e-05 tissue_surface_offset_m=8.8e-05 tissue_anchor_node=2707 tissue_contact_nodes=1280/1280 tissue_authored_capsule_first=[-0.005502,0.009167,0.001885] tissue_authored_capsule_second=[-0.004853,0.009141,0.001885]
+tissue_contact_anchor_node=2707 fixed=0 compiled_pairs=1 needle_contact_segments=1 suture_contact_segments=0 total_contact_proxies=1 self_contact=0 proxy_flags=6
+tissue_entry_contact normal_impulse_ns=7.1538710244567483e-07 puncture_tip_contacts=1 puncture_tip_impulse_ns=7.1538710244567483e-07 puncture_tip_accepted_impulse_ns=7.1538710244567483e-07 puncture_tip_dual_area_m2=1.5428552075164899e-06 puncture_tip_normal_traction_pa=7418.8381642698396 puncture_tip_accepted_normal_traction_pa=7418.8381642698396 puncture_cohesive_strength_pa=10000 suture_strand_contacts=0 suture_strand_impulse_ns=0 maximum_specific_impulse_mps=5.0693592737536335 minimum_contact_node_mass_kg=1.4111982675001111e-07 legacy_absolute_threshold_ns=4.9999999999999998e-07
+perfused_tissue_tapered_tip_puncture=ok reaction_contacts=1 final_active_contacts=1 final_normal_impulse_ns=7.15387102e-07 suture_strand_contacts=0 suture_strand_impulse_ns=0 reaction_impulse_ns=[0.000001,-0.000000,0.000000] needle_velocity_delta_mps=0.00621672505 thread_root_velocity_delta_mps=0.00898997697 maximum_tissue_displacement_m=1.54502536e-05 hard_swage_root_error_m=1.38207489e-07 matter_maximum_nonlinear_residual=5.75009472e-05 matter_maximum_relative_correction=0 matter_maximum_volume_residual=0.000362558174 matter_minimum_determinant=0.982658625 matter_maximum_fgmres_iterations=101 active_puncture_channels=1 active_tetrahedra=13824 active_material_tetrahedra=[5184,3456,3456,1728] authored_material_tetrahedra=[5184,3456,3456,1728] removed_tissue_mass_kg=0 analytic_channel_tract_mass_kg=1.5710916e-09 removed_to_channel_tract_mass_ratio=0 puncture_channel_radius_m=6.29999995e-05 puncture_channel_length_m=0.000125999999 puncture_channel_axis_alignment=0.999999997 puncture_impulse_threshold_ns=5e-07 channel_release_contacts=0 channel_release_puncture_tip_contacts=0 channel_release_strand_contacts=0 channel_release_channels=1 channel_release_links=0 channel_release_material_tetrahedra=[5184,3456,3456,1728] channel_release_total_length_m=0.000125999999 channel_release_signed_needle_motion_m=7.08389667e-09 channel_release_minimum_determinant=0.993037999 channel_release_maximum_residual=0.000244054565 channel_release_swage_error_m=2.04106396e-07 channel_release_state_fnv64=0xaec4d87ac41b50e5 accepted_state_fnv64=0x6a8ce69f889f4539 reference_gpu_ms=204.789625 coupled_gpu_ms=4673.86675 failed_steps=0
+<end of output>
+Test time =   8.09 sec
+----------------------------------------------------------
+Test Passed.
+"coupled.suture.perfused_tissue_puncture" end time: Oct 04 13:48 CEST
+"coupled.suture.perfused_tissue_puncture" time elapsed: 00:00:08
+----------------------------------------------------------
+
+End testing: Oct 04 13:48 CEST
+
+coupled =  24.24 sec*proc
+
+metal =  24.24 sec*proc
+
+physics =  24.24 sec*proc
