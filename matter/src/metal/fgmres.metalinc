@@ -256,6 +256,8 @@ kernel void nm_fgmres_begin(
     device const NMTetrahedronGPU* tetrahedra [[buffer(19)]],
     device const NMFEMFieldStateGPU* candidateFields [[buffer(20)]],
     device const NMMixedMaterialGPU* mixedMaterials [[buffer(21)]],
+    device const float4* externalForces [[buffer(22)]],
+    constant uint& hasExternalForces [[buffer(23)]],
     uint lane [[thread_index_in_threadgroup]],
     uint group [[threadgroup_position_in_grid]]
 ) {
@@ -268,6 +270,7 @@ kernel void nm_fgmres_begin(
     float norm2 = 0.0f;
     float normCorrection = 0.0f;
     float maximumCandidateSpeedSquared = 0.0f;
+    float maximumExternalForceSquared = 0.0f;
     const bool active = environmentHealthy(statuses, environment) &&
         !completed;
     const uint totalNodes = dispatch.environmentCount * dispatch.femNodeCount;
@@ -277,6 +280,7 @@ kernel void nm_fgmres_begin(
     if (active) {
         const uint base = environment * dispatch.femNodeCount;
         for (uint local = lane; local < dispatch.femNodeCount; local += 32u) {
+            if (hasExternalForces) maximumExternalForceSquared = max(maximumExternalForceSquared, length_squared(externalForces[base + local].xyz));
             maximumCandidateSpeedSquared = max(
                 maximumCandidateSpeedSquared,
                 length_squared(candidateNodes[base + local]
@@ -317,6 +321,7 @@ kernel void nm_fgmres_begin(
     }
     norm2 = simd_sum(norm2);
     maximumCandidateSpeedSquared = simd_max(maximumCandidateSpeedSquared);
+    maximumExternalForceSquared = simd_max(maximumExternalForceSquared);
     // Publication certifies the raw per-object incompressibility RMS in
     // addition to the equilibrated KKT norm.  Measure that same physical
     // residual before declaring an early nonlinear exit; otherwise pressure
@@ -404,10 +409,11 @@ kernel void nm_fgmres_begin(
     const bool correctionFinite = nonlinearIteration > 1u &&
         isfinite(previousNonlinear.z);
     const float nonlinearThreshold = max(
-        solver.regularization.x,
+        1.0e-20f,
         solver.residualTolerances.x * max(firstNewtonNorm, 1.0f));
     const bool contactFreeStaticRest = nonlinearIteration == 0u &&
         !hasActiveContact &&
+        maximumExternalForceSquared == 0.0f &&
         maximumCandidateSpeedSquared == 0.0f &&
         all(dispatch.gravityAndTimestep.xyz == float3(0.0f));
     const bool nonlinearConverged = restartCycle == 0u &&
@@ -780,7 +786,7 @@ kernel void nm_fgmres_build_preconditioner(
     const float pressureInverse = (object.flags & NM_OBJECT_MIXED_FEM) != 0u
         ? 1.0f / max(pressureSchur, solver.regularization.x)
         : 0.0f;
-    inverseDiagonal[global] = float4(velocityInverse, pressureInverse);
+    inverseDiagonal[global] = float4(velocityInverse / max(solver.contactAcceptance.y, 1.0f), pressureInverse);
 }
 
 kernel void nm_fgmres_export_rigid(
@@ -1856,7 +1862,7 @@ kernel void nm_fgmres_finalize_cycle(
     // Newton assembly certify that full KKT residual instead of latching a
     // linear failure at an already acceptable absolute residual.
     const float nonlinearThreshold = max(
-        solver.regularization.x,
+        1.0e-20f,
         solver.residualTolerances.x * max(state.nonlinear.x, 1.0f));
     const bool reachedNonlinearTarget = used > 0u &&
         state.diagnostics.x <= nonlinearThreshold;
@@ -2954,6 +2960,18 @@ kernel void nm_mpm_apply_implicit_solution(
         ? lineSearch[environment * dispatch.objectCount].x : 0.0f;
     nodes[nodeGlobal].candidateVelocity.xyz += alpha *
         solution[fgmresMPMIndex(dispatch, environment, slot)].xyz;
+}
+
+// A left scaling, applied only after all mechanics/contact row assembly.
+// The operator and right preconditioner use the identical scale.
+kernel void nm_fgmres_scale_fem_mechanical_rows(
+    constant NMMatterDispatchGPU& dispatch [[buffer(0)]],
+    constant NMMixedSolverGPU& solver [[buffer(1)]],
+    device float4* values [[buffer(2)]],
+    uint global [[thread_position_in_grid]]
+) {
+    if (global >= dispatch.environmentCount * dispatch.femNodeCount) return;
+    values[global].xyz *= max(solver.contactAcceptance.y, 1.0f);
 }
 
 } // namespace numi_matter_metal

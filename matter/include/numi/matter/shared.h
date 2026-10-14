@@ -159,6 +159,7 @@ enum NMMatterFlags : nm_u32 {
     NM_MATTER_MUTATION = 1u << 6u,
     NM_MATTER_LEARNED_MATERIAL = 1u << 7u,
     NM_MATTER_IPC = 1u << 8u,
+    NM_MATTER_FULL_TRIANGLE_MANIFOLD = 1u << 9u,
 };
 
 enum NMObjectFlags : nm_u32 {
@@ -354,7 +355,7 @@ typedef struct NM_ALIGN16 NMMixedSolverGPU {
     nm_uint4 executionBudgets;
     // Equilibrium, volume, pressure, and transport relative residuals.
     nm_float4 residualTolerances;
-    // Minimum separation/contact-slop ratio, reserved, reserved, reserved.
+    // Minimum separation/contact-slop ratio, FEM momentum row scale (0 = 1), reserved, reserved.
     nm_float4 contactAcceptance;
     // diagonal floor, initial LM shift, maximum LM shift, curvature tolerance.
     nm_float4 regularization;

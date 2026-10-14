@@ -58,9 +58,12 @@ inline float ipcFeatureMollifierDifferential(
     const float firstNorm2 = dot(first, first);
     const float secondNorm2 = dot(second, second);
     const float scale = firstNorm2 * secondNorm2;
-    if (!(scale > kGeometryFloor)) return 0.0f;
+    // scale and threshold carry length^4, whereas kGeometryFloor carries
+    // length^2. Comparing them directly erased sub-millimetre contact rows.
+    constexpr float quarticFloor = kGeometryFloor * kGeometryFloor;
+    if (!(scale > quarticFloor)) return 0.0f;
     constexpr float relativeThreshold = 1.0e-3f;
-    const float threshold = max(relativeThreshold * scale, kGeometryFloor);
+    const float threshold = max(relativeThreshold * scale, quarticFloor);
     const float inner = dot(first, second);
     const float measure = max(scale - inner * inner, 0.0f);
     const float ratio = clamp(measure / threshold, 0.0f, 1.0f);
@@ -75,17 +78,14 @@ inline float ipcFeatureMollifierDifferential(
         (firstNorm2 * second - inner * first);
     float3 ratioFirst;
     float3 ratioSecond;
-    if (relativeThreshold * scale >= kGeometryFloor) {
+    if (relativeThreshold * scale >= quarticFloor) {
         const float3 scaleFirst = 2.0f * secondNorm2 * first;
         const float3 scaleSecond = 2.0f * firstNorm2 * second;
-        const float inverseThreshold2 = 1.0f /
-            max(threshold * threshold, kGeometryFloor * kGeometryFloor);
-        ratioFirst = relativeThreshold *
-            (measureFirst * scale - measure * scaleFirst) *
-            inverseThreshold2;
-        ratioSecond = relativeThreshold *
-            (measureSecond * scale - measure * scaleSecond) *
-            inverseThreshold2;
+        // Equivalent quotient derivative without a length^8 reciprocal,
+        // which can overflow FP32 on otherwise resolvable small features.
+        const float normalizedMeasure = measure / scale;
+        ratioFirst = (measureFirst - normalizedMeasure * scaleFirst) / threshold;
+        ratioSecond = (measureSecond - normalizedMeasure * scaleSecond) / threshold;
     } else {
         ratioFirst = measureFirst / threshold;
         ratioSecond = measureSecond / threshold;
@@ -629,16 +629,22 @@ kernel void nm_contact_build_deformable_candidates(
                         dispatch, left, right, objects, topologyNodes,
                         environment);
             }
-            const uint prefix = simd_prefix_exclusive_sum(
-                selected ? 1u : 0u);
-            const uint count = simd_sum(selected ? 1u : 0u);
-            if (selected && outputCount + prefix < capacity) {
+            const bool completeTrianglePair = selected &&
+                (dispatch.flags & NM_MATTER_FULL_TRIANGLE_MANIFOLD) != 0u &&
+                left.identity.y == NM_CONTINUUM_SURFACE_TRIANGLE &&
+                right.identity.y == NM_CONTINUUM_SURFACE_TRIANGLE;
+            const uint rowCount = selected ? (completeTrianglePair ? 15u : 1u) : 0u;
+            const uint prefix = simd_prefix_exclusive_sum(rowCount);
+            const uint count = simd_sum(rowCount);
+            for(uint feature=0u;feature<rowCount;++feature) {
+                const uint output = outputCount + prefix + feature;
+                if(output >= capacity) break;
                 NMDeformableContactCandidateGPU candidate{};
                 candidate.identity = {
-                    leftIndex, rightIndex, outputCount + prefix,
-                    NM_TOPOLOGY_ACTIVE,
+                    leftIndex, rightIndex, output,
+                    NM_TOPOLOGY_ACTIVE | (completeTrianglePair ? ((feature+1u)<<16u) : 0u),
                 };
-                candidates[candidateBase + outputCount + prefix] = candidate;
+                candidates[candidateBase + output] = candidate;
             }
             threadgroup_barrier(
                 mem_flags::mem_device | mem_flags::mem_threadgroup);
@@ -711,7 +717,7 @@ inline float3 closestPointOnTriangle(
         barycentric = float3(0.0f, 1.0f - w, w);
         return b + w * (c - b);
     }
-    const float denominator = max(va + vb + vc, kGeometryFloor);
+    const float denominator = max(va + vb + vc, kGeometryFloor * kGeometryFloor);
     const float v = vb / denominator;
     const float w = vc / denominator;
     barycentric = float3(1.0f - v - w, v, w);
@@ -747,7 +753,7 @@ inline void closestPointsOnSegments(
         } else {
             const float b = dot(dP, dQ);
             const float denominator = a * e - b * b;
-            s = denominator > kGeometryFloor
+            s = denominator > kGeometryFloor * kGeometryFloor
                 ? clamp((b * f - c * e) / denominator, 0.0f, 1.0f)
                 : 0.0f;
             t = (b * s + f) / e;
@@ -796,10 +802,11 @@ inline bool vertexTriangleCCD(
     const float distanceRoundoff =
         ccdDistanceRoundoff(thickness, coordinateScale);
     const float effectiveThickness = thickness + distanceRoundoff;
-    const float speedBound = length(vertex1 - vertex0) + max(
-        length(a1 - a0), max(length(b1 - b0), length(c1 - c0)));
+    const float3 vertexDisplacement = vertex1 - vertex0;
+    const float speedBound = max(length(vertexDisplacement - (a1-a0)),
+        max(length(vertexDisplacement - (b1-b0)), length(vertexDisplacement - (c1-c0))));
     float time = 0.0f;
-    for (uint iteration = 0u; iteration < 16u; ++iteration) {
+    for (uint iteration = 0u; iteration < 64u; ++iteration) {
         const float3 vertexPoint = mix(vertex0, vertex1, time);
         const float3 a = mix(a0, a1, time);
         const float3 b = mix(b0, b1, time);
@@ -811,6 +818,12 @@ inline bool vertexTriangleCCD(
         const float distance = length(delta);
         toi = time;
         separation = distance;
+        if (!isfinite(distance) || !isfinite(speedBound)) return false;
+        // Keep the last certified safe-prefix witness even when conservative
+        // advancement approaches a grazing event too slowly to finish.
+        barycentric = bary;
+        point = trianglePoint;
+        normal = distance > kGeometryFloor ? delta / distance : float3(0,0,1);
         if (distance <= effectiveThickness) {
             float3 fallback = cross(b - a, c - a);
             if (length(fallback) <= kGeometryFloor)
@@ -826,7 +839,7 @@ inline bool vertexTriangleCCD(
             certified = true;
             return finite3(normal);
         }
-        if (!(speedBound > kGeometryFloor)) {
+        if (time >= 1.0f || !(speedBound > kGeometryFloor)) {
             certified = true;
             return false;
         }
@@ -839,7 +852,12 @@ inline bool vertexTriangleCCD(
         }
         time = min(time, 1.0f);
     }
-    return false;
+    // Exhaustion certifies only the safe prefix, never the rest of the sweep.
+    // Emit a conservative possible hit at that prefix so the line search
+    // retains the proven interval. Candidate geometry still owns the barrier
+    // and the final positive-separation certificate.
+    certified = finite3(normal) && finite3(point) && isfinite(separation);
+    return certified;
 }
 
 inline bool edgeEdgeCCD(
@@ -873,10 +891,12 @@ inline bool edgeEdgeCCD(
     const float distanceRoundoff =
         ccdDistanceRoundoff(thickness, coordinateScale);
     const float effectiveThickness = thickness + distanceRoundoff;
-    const float speedBound = max(length(p01 - p00), length(p11 - p10)) +
-        max(length(q01 - q00), length(q11 - q10));
+    const float3 p0Displacement=p01-p00,p1Displacement=p11-p10;
+    const float3 q0Displacement=q01-q00,q1Displacement=q11-q10;
+    const float speedBound = max(max(length(p0Displacement-q0Displacement),length(p0Displacement-q1Displacement)),
+        max(length(p1Displacement-q0Displacement),length(p1Displacement-q1Displacement)));
     float time = 0.0f;
-    for (uint iteration = 0u; iteration < 16u; ++iteration) {
+    for (uint iteration = 0u; iteration < 64u; ++iteration) {
         const float3 p0 = mix(p00, p01, time);
         const float3 p1 = mix(p10, p11, time);
         const float3 q0 = mix(q00, q01, time);
@@ -888,6 +908,10 @@ inline bool edgeEdgeCCD(
         const float distance = length(delta);
         toi = time;
         separation = distance;
+        if (!isfinite(distance) || !isfinite(speedBound)) return false;
+        parameters = float2(s,t);
+        point = 0.5f * (pointP + pointQ);
+        normal = distance > kGeometryFloor ? delta / distance : float3(0,0,1);
         if (distance <= effectiveThickness) {
             float3 fallback = cross(p1 - p0, q1 - q0);
             if (length(fallback) <= kGeometryFloor)
@@ -902,7 +926,7 @@ inline bool edgeEdgeCCD(
             certified = true;
             return finite3(normal);
         }
-        if (!(speedBound > kGeometryFloor)) {
+        if (time >= 1.0f || !(speedBound > kGeometryFloor)) {
             certified = true;
             return false;
         }
@@ -915,7 +939,9 @@ inline bool edgeEdgeCCD(
         }
         time = min(time, 1.0f);
     }
-    return false;
+    // Same safe-prefix contract as vertex/triangle advancement above.
+    certified = finite3(normal) && finite3(point) && isfinite(separation);
+    return certified;
 }
 
 inline bool pointPointCCD(
@@ -1002,6 +1028,7 @@ kernel void nm_contact_narrowphase_deformable(
     if (slot >= candidateCounts[environment]) return;
     const NMDeformableContactCandidateGPU candidate = candidates[global];
     if ((candidate.identity.w & NM_TOPOLOGY_ACTIVE) == 0u) return;
+    const uint selectedFeature = (candidate.identity.w >> 16u) & 0xffu;
     const uint primitiveCount = continuumSurfacePrimitiveCount(dispatch);
     if (candidate.identity.x >= primitiveCount ||
         candidate.identity.y >= primitiveCount) return;
@@ -1152,6 +1179,7 @@ kernel void nm_contact_narrowphase_deformable(
             const uint vertexBase = direction == 0u ? 0u : 3u;
             const uint triangleBase = direction == 0u ? 3u : 0u;
             for (uint vertexIndex = 0u; vertexIndex < 3u; ++vertexIndex) {
+                if(selectedFeature != 0u && selectedFeature != 1u + direction*3u + vertexIndex) continue;
                 float toi, separation;
                 float3 normal, barycentric, point;
                 bool certified = false;
@@ -1197,6 +1225,7 @@ kernel void nm_contact_narrowphase_deformable(
         };
         for (uint edgeA = 0u; edgeA < 3u; ++edgeA) {
             for (uint edgeB = 0u; edgeB < 3u; ++edgeB) {
+                if(selectedFeature != 0u && selectedFeature != 7u + edgeA*3u + edgeB) continue;
                 const uint2 a = edges[edgeA];
                 const uint2 b = edges[edgeB];
                 float toi, separation;
@@ -1335,7 +1364,7 @@ kernel void nm_contact_narrowphase_deformable(
     contact.velocityAndResponse = float4(relativeVelocity, inverseResponse);
     contact.source = {
         candidate.identity.x, candidate.identity.y, candidate.identity.z,
-        max(left.identity.z, right.identity.z)
+        max(left.identity.z, right.identity.z) | (selectedFeature << 24u)
     };
     const bool sameSource =
         previous.laggedTangentAndFriction.w > 0.5f &&
@@ -1466,7 +1495,12 @@ kernel void nm_contact_narrowphase_deformable(
     float2 laggedFriction = tangentSpeed > 0.0f
         ? -frictionLimit * tangentVelocity / regularizedSpeed
         : float2(0.0f);
-    if (sameSource && tangentSpeed < 0.25f * transitionSpeed)
+    // A complete-manifold Newton candidate uses the differentiable
+    // regularized Coulomb force whose velocity derivative is assembled below.
+    // Reusing an accepted-frame tangent impulse at low speed makes the force
+    // constant while retaining that derivative and stalls loaded closure.
+    if (sameSource && tangentSpeed < 0.25f * transitionSpeed &&
+        (dispatch.flags & NM_MATTER_FULL_TRIANGLE_MANIFOLD) == 0u)
         laggedFriction = transportedTangent;
     contact.impulseAndFriction = float4(
         barrier.x,
@@ -2994,9 +3028,12 @@ kernel void nm_contact_limit_deformable_line_search(
             existing * clamp(0.9f * toi, 0.0f, 1.0f)
         );
 
+        // Feasibility protects the collision boundary, not the activation
+        // distance. Bounding at shat freezes an approaching pair where the
+        // barrier force is still zero, so a loaded equilibrium cannot form.
         const float gap = dot(
             contact.normalAndTOI.xyz, weightedPosition) -
-            dispatch.numericalLimits.x;
+            collisionThickness;
         const float directionalGap = dot(
             contact.normalAndTOI.xyz, weightedDirection);
         if (gap > 0.0f && directionalGap < 0.0f)
@@ -3019,7 +3056,12 @@ kernel void nm_contact_limit_deformable_line_search(
         // this feature is locally descending. The collision-free bound above
         // remains authoritative for features whose energy rises inside a
         // globally coupled KKT direction.
-        if (currentEnergy > 0.0f && bound > 0.0f) {
+        // Complete-manifold Newton solves one coupled residual. Requiring a
+        // decrease of each individual barrier over-constrains that direction
+        // and can stall a globally loaded equilibrium. Its swept feasibility
+        // bounds remain active; the assembled KKT certificate owns acceptance.
+        if ((dispatch.flags & NM_MATTER_FULL_TRIANGLE_MANIFOLD) == 0u &&
+            currentEnergy > 0.0f && bound > 0.0f) {
             const float dt = objectTimestep(
                 dispatch,
                 schedulers[environment * dispatch.objectCount +

@@ -28,7 +28,7 @@ constexpr std::uint32_t kKnownMatterFlags =
     NM_MATTER_MULTIPHYSICS |
     NM_MATTER_MUTATION |
     NM_MATTER_LEARNED_MATERIAL |
-    NM_MATTER_IPC;
+    NM_MATTER_IPC | NM_MATTER_FULL_TRIANGLE_MANIFOLD;
 constexpr std::uint32_t kKnownMaterialFlags =
     NM_MATERIAL_HAS_STATE |
     NM_MATERIAL_HAS_DISSIPATION |
@@ -248,7 +248,8 @@ private:
             !finite4(solver.contactAcceptance) ||
             solver.contactAcceptance.x < 0.0f ||
             solver.contactAcceptance.x >= 1.0f ||
-            solver.contactAcceptance.y != 0.0f ||
+            (solver.contactAcceptance.y != 0.0f && solver.contactAcceptance.y < 1.0f) ||
+            solver.contactAcceptance.y > 1.0e12f ||
             solver.contactAcceptance.z != 0.0f ||
             solver.contactAcceptance.w != 0.0f ||
             !finite4(solver.regularization) ||

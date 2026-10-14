@@ -685,7 +685,7 @@ kernel void nm_mixed_certify(
         simd_sum(transportScaleNorm2.z), simd_sum(transportScaleNorm2.w));
     const float initialNorm = max(
         fgmresStates[environment]
-            .diagnostics.y,
+            .nonlinear.x,
         1.0f
     );
     const float relativeResidual = sqrt(max(residualNorm2, 0.0f)) /

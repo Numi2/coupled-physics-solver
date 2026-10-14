@@ -330,6 +330,8 @@ struct MixedSolverSource {
     // Dimensionless floor relative to WorldSource::contactSlop. A separate
     // coordinate-scale FP32 floor is always retained by the Metal kernel.
     double minimumContactSeparationRatio = 1.0e-4;
+    // Left scaling of FEM momentum rows; legacy packages use zero for unity.
+    double mechanicalResidualScale = 1.0;
     double diagonalFloor = 1.0e-8;
     double initialLMShift = 1.0e-6;
     double maximumLMShift = 1.0e4;
@@ -482,6 +484,8 @@ struct WorldSource {
     std::uint32_t environmentCount = 1u;
     std::uint32_t identificationCandidates = 0u;
     bool deterministic = true;
+    // Preserve all six vertex/triangle and nine edge/edge contact features.
+    bool fullTriangleContactManifold = false;
     MixedSolverSource mixedSolver;
     std::vector<MaterialProgram> materials;
     std::vector<ObjectSource> objects;
@@ -689,6 +693,19 @@ using EncodeCoupledCandidate = bool (*)(
 );
 
 struct EncodeRequest {
+    // Optional immutable CPU-visible eyelet topology/material buffers. Only
+    // one FEM environment is supported. Native forces overwrite the borrowed
+    // external-force field at every Newton candidate; its exact tangent joins
+    // the same operator. Loop state is output; material parameters stay fixed.
+    void* sutureAnchors = nullptr;
+    void* sutureLoops = nullptr;
+    std::uint32_t sutureAnchorCount = 0u;
+    std::uint32_t sutureLoopCount = 0u;
+    float suturePullProgress = 0.0f;
+    bool sutureForceEnabled = true;
+    // Borrowed environment-major float4 Newton external-force field, in N.
+    void* femExternalForces = nullptr;
+    std::uint32_t femExternalForceCount = 0;
     void* commandBuffer = nullptr; // borrowed id<MTLCommandBuffer>
     BorrowedRigidWorldBuffers rigid{};
     EncodePhase phase = EncodePhase::preDynamics;
@@ -895,6 +912,9 @@ public:
     ) noexcept;
     [[nodiscard]] SolverIterationBudgets solverIterationBudgets() const noexcept;
     [[nodiscard]] RuntimeStateSnapshot snapshot() const;
+    // Borrowed read-only accepted FEM state for a force pass on the same queue.
+    // Valid until runtime growth/destruction; callers must not write it.
+    [[nodiscard]] void* acceptedFEMNodeBuffer() const noexcept;
     [[nodiscard]] void* eventBuffer() const noexcept;
     [[nodiscard]] void* statusBuffer() const noexcept;
     [[nodiscard]] void* parameterBuffer() const noexcept;

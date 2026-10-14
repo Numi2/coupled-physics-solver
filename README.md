@@ -7,8 +7,15 @@ there is no second simulation queue in the normal coupled path.
 
 This is a focused extraction from Numi Lab. It contains the solver, material
 compiler/runtime, surgical tissue and suture mechanics, and executable physics
-probes. It does not contain training, MLX, rendering, app UI, or unrelated robot
-products. See [PROVENANCE.md](PROVENANCE.md) for the exact source revision.
+probes. It includes a small native viewer for the skin stitch bench. It does not
+contain training, MLX, or unrelated robot products. See [PROVENANCE.md](PROVENANCE.md) for the exact source revision.
+
+## Skin suture entry point
+
+Run **`./suture`** to build, simulate and view the Metal prethreaded skin closure
+bench. [Scene, checks and evidence](docs/SKIN_SUTURE.md). The
+[bag](https://github.com/Numi2/numi-solver) stays in its separate solver repository
+with its own `./bag` entry point.
 
 ## Requirements
 

@@ -111,6 +111,8 @@ if(APPLE)
             src/metal/mpm.metalinc
             src/metal/fem.metalinc
             src/metal/fgmres.metalinc
+            src/metal/suture_thread.metalinc
+            include/numi/matter/suture_thread.h
             src/metal/mixed_fem.metalinc
             src/metal/topology_mutation.metalinc
             src/metal/contact.metalinc

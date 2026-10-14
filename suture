@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""One entry point for the Metal skin stitch bench and its native replay."""
+import argparse,datetime,hashlib,json,os,plistlib,signal,subprocess,sys
+from pathlib import Path
+ROOT=Path(__file__).resolve().parent
+BUILD=ROOT/'build/suture'
+sys.path.insert(0,str(ROOT/'tools'))
+from check_skin_suture import check
+from prepare_suture_replay import prepare
+
+def execute(args,**kwargs):return subprocess.run([str(a) for a in args],check=True,**kwargs)
+def build(viewer=False):
+    execute(['cmake','-S',ROOT,'-B',BUILD,'-DCMAKE_BUILD_TYPE=Release'],stdout=subprocess.DEVNULL)
+    execute(['cmake','--build',BUILD,'--target','coupled_skin_suture','-j4'],stdout=subprocess.DEVNULL)
+    if viewer:
+        app=BUILD/'Suture.app/Contents';(app/'MacOS').mkdir(parents=True,exist_ok=True)
+        (app/'Info.plist').write_bytes(plistlib.dumps({'CFBundleExecutable':'Suture','CFBundleIdentifier':'science.numi.skin-suture','CFBundleName':'Skin Suture','NSHighResolutionCapable':True}))
+        target=app/'MacOS/Suture';source=ROOT/'tools/suture_viewer.swift'
+        if not target.exists() or source.stat().st_mtime>target.stat().st_mtime:execute(['xcrun','swiftc','-O',source,'-o',target])
+
+def run(scene='thread',dt=.001):
+    stamp=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
+    out=BUILD/'runs'/stamp;out.mkdir(parents=True)
+    command=[BUILD/'bin/coupled_skin_suture',out,ROOT/'matter/materials/synthetic_skin_wound.nmatter',BUILD/'matter/shaders/NumiMatter.metallib','--steps',str(round(.080/dt)),'--timestep',str(dt)]
+    if scene in ['thread','no-thread']:command+=['--thread']
+    if scene=='no-thread':command+=['--no-thread-coupling']
+    if scene=='control':command+=['--force-per-site-n','0']
+    sources=subprocess.check_output(['git','ls-files','--cached','--others','--exclude-standard'],cwd=ROOT,text=True).splitlines()
+    hashes={p:hashlib.sha256((ROOT/p).read_bytes()).hexdigest() for p in sources if (ROOT/p).is_file()}
+    for p in [BUILD/'bin/coupled_skin_suture',BUILD/'matter/shaders/NumiMatter.metallib']:hashes[str(p.relative_to(ROOT))]=hashlib.sha256(p.read_bytes()).hexdigest()
+    (out/'identity.json').write_text(json.dumps({'git_head':subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip(),'files':hashes},indent=2)+'\n')
+    (out/'source.patch').write_bytes(subprocess.check_output(['git','diff','--binary','HEAD'],cwd=ROOT))
+    for name in subprocess.check_output(['git','ls-files','--others','--exclude-standard'],cwd=ROOT,text=True).splitlines():
+        source=ROOT/name
+        if source.is_file():
+            target=out/'untracked-source'/name;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(source.read_bytes())
+    (out/'command.json').write_text(json.dumps([str(a) for a in command],indent=2)+'\n')
+    print(f'Metal skin scene: {scene}; 60 ms pull + 20 ms hold; replay: {out}',flush=True)
+    worker=None
+    try:
+        with (out/'run.log').open('w') as log:
+            worker=subprocess.Popen([str(a) for a in command],stdout=log,stderr=subprocess.STDOUT,start_new_session=True);code=worker.wait()
+    except KeyboardInterrupt:
+        if worker and worker.poll() is None:os.killpg(worker.pid,signal.SIGTERM);worker.wait()
+        (out/'exit.txt').write_text('130\n');print('Stopped. Accepted states and rejection evidence retained.');raise SystemExit(130)
+    (out/'exit.txt').write_text(str(code)+'\n');print((out/'run.log').read_text(),end='')
+    if code:raise SystemExit(code)
+    try: report=check(out,closure=scene=='thread');prepare(out)
+    except Exception as error:
+        (out/'verification-rejection.json').write_text(json.dumps({'status':'rejected','reason':str(error)},indent=2)+'\n')
+        raise
+    tmp=BUILD/'latest.tmp';tmp.unlink(missing_ok=True);tmp.symlink_to(out.relative_to(BUILD));tmp.replace(BUILD/'latest')
+    print(json.dumps(report,indent=2));return out,report
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('action',nargs='?',choices=['run','check','view'],default='run')
+    parser.add_argument('directory',nargs='?',type=Path)
+    parser.add_argument('--scene',choices=['thread','no-thread','traction','control'],default='thread')
+    parser.add_argument('--timestep',type=float,choices=[.001,.0005],default=.001)
+    parser.add_argument('--headless',action='store_true')
+    args=parser.parse_args()
+    if args.action=='view':
+        build(True);d=args.directory or BUILD/'latest';execute([BUILD/'Suture.app/Contents/MacOS/Suture',prepare(d)]);return
+    build(not args.headless)
+    if args.action=='check':
+        execute(['cmake','--build',BUILD,'--target','coupled_suture_contract','-j4'],stdout=subprocess.DEVNULL)
+        execute([BUILD/'bin/coupled_suture_contract',BUILD/'tests/SutureContract.metallib'])
+        baseline,first=run();control,_=run('no-thread');refined,last=run(dt=.0005)
+        # A refinement agreement, not a new clinical/physical qualification.
+        difference=abs(first['final_gap_mm']-last['final_gap_mm'])
+        assert difference<.015, f'timestep sensitivity too large: {difference} mm'
+        receipt={'thread':str(baseline),'no_thread':str(control),'half_timestep':str(refined),'final_gap_difference_mm':difference}
+        (BUILD/'check.json').write_text(json.dumps(receipt,indent=2)+'\n')
+        tmp=BUILD/'latest.tmp';tmp.unlink(missing_ok=True);tmp.symlink_to(baseline.relative_to(BUILD));tmp.replace(BUILD/'latest')
+        print(json.dumps(receipt,indent=2));return
+    out,_=run(args.scene,args.timestep)
+    if not args.headless:execute([BUILD/'Suture.app/Contents/MacOS/Suture',out/'replay.json'])
+if __name__=='__main__':main()

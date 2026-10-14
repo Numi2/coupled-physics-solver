@@ -248,7 +248,7 @@ using Mat3 = std::array<double, 9>;
     );
     result.contactAcceptance = f4(
         source.minimumContactSeparationRatio,
-        0.0,
+        source.mechanicalResidualScale,
         0.0,
         0.0
     );
@@ -501,12 +501,13 @@ void validateWorld(
         solver.fieldSmootherPasses,
         solver.mutationRestarts,
     };
-    const std::array<double, 13> tolerances{
+    const std::array<double, 14> tolerances{
         solver.relativeResidual,
         solver.volumeTolerance,
         solver.pressureTolerance,
         solver.transportTolerance,
         solver.minimumContactSeparationRatio,
+        solver.mechanicalResidualScale,
         solver.diagonalFloor,
         solver.initialLMShift,
         solver.maximumLMShift,
@@ -540,7 +541,7 @@ void validateWorld(
         }) || solver.fgmresRestart > solver.fgmresIterations ||
         std::ranges::any_of(tolerances, [](const double value) {
             return !finite(value) || value < 0.0;
-        }) || !(solver.diagonalFloor > 0.0) ||
+        }) || !(solver.mechanicalResidualScale >= 1.0 && solver.mechanicalResidualScale <= 1.0e12) || !(solver.diagonalFloor > 0.0) ||
         !(solver.initialLMShift > 0.0) ||
         !(solver.maximumLMShift >= solver.initialLMShift) ||
         !(solver.minimumContactSeparationRatio < 1.0) ||
@@ -2284,6 +2285,7 @@ CompileResult compileWorld(
     dispatch.flags =
         (source.deterministic ? NM_MATTER_DETERMINISTIC : 0u) |
         NM_MATTER_IPC |
+        (source.fullTriangleContactManifold ? NM_MATTER_FULL_TRIANGLE_MANIFOLD : 0u) |
         (!world.contact.pairs.empty() ? NM_MATTER_CONTACT : 0u) |
         (std::ranges::any_of(source.objects, [](const ObjectSource& object) {
             return object.adaptive;

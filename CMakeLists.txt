@@ -253,3 +253,25 @@ if(BUILD_TESTING)
         coupled.metal4.execution_contract
         PROPERTIES LABELS "coupled;metal;physics" TIMEOUT 300)
 endif()
+
+# Focused synthetic wound instrument; shares the owning Metal runtime.
+coupled_probe(coupled_skin_suture apps/skin_suture.mm)
+target_compile_options(coupled_skin_suture PRIVATE -fobjc-arc)
+
+# Analytic geometry regressions execute the owning CCD functions on Metal.
+set(SUTURE_CONTRACT_METALLIB "${CMAKE_CURRENT_BINARY_DIR}/tests/SutureContract.metallib")
+file(GLOB SUTURE_MATTER_INCLUDES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/matter/src/metal/*.metalinc")
+add_custom_command(OUTPUT "${SUTURE_CONTRACT_METALLIB}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/tests"
+    COMMAND xcrun -sdk macosx metal -std=metal4.0 -O3 -fno-fast-math
+        -I "${CMAKE_CURRENT_SOURCE_DIR}/include" -I "${CMAKE_CURRENT_SOURCE_DIR}/matter/include"
+        -c "${CMAKE_CURRENT_SOURCE_DIR}/tests/SutureContract.metal"
+        -o "${CMAKE_CURRENT_BINARY_DIR}/tests/SutureContract.air"
+    COMMAND xcrun -sdk macosx metallib "${CMAKE_CURRENT_BINARY_DIR}/tests/SutureContract.air" -o "${SUTURE_CONTRACT_METALLIB}"
+    DEPENDS tests/SutureContract.metal ${SUTURE_MATTER_INCLUDES}
+        matter/src/matter_kernels.metal matter/include/numi/matter/shared.h matter/include/numi/matter/suture_thread.h
+    VERBATIM)
+add_custom_target(suture_contract_shaders DEPENDS "${SUTURE_CONTRACT_METALLIB}")
+coupled_probe(coupled_suture_contract apps/skin_suture_contract.mm)
+target_compile_options(coupled_suture_contract PRIVATE -fobjc-arc)
+add_dependencies(coupled_suture_contract suture_contract_shaders)

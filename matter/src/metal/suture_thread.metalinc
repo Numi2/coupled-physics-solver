@@ -1,0 +1,100 @@
+#include "numi/matter/suture_thread.h"
+namespace numi_matter_metal {
+inline float3 sutureCorner(device const NMFEMNodeStateGPU* nodes,
+    device const NMSutureAnchorGPU* anchors, uint count, uint loop, uint corner) {
+    float3 p(0.0f);
+    for (uint i=0; i<count; ++i) if (anchors[i].identity.y==loop && anchors[i].identity.z==corner)
+        p += anchors[i].weights.x * nodes[anchors[i].identity.x].positionAndMass.xyz;
+    return p;
+}
+// Native material flux: shortening the loop transfers the same material into
+// the tail. The eyelets constrain the path, but never fix tissue positions.
+kernel void nm_suture_thread_forces(
+    device const NMFEMNodeStateGPU* nodes [[buffer(0)]],
+    device const NMSutureAnchorGPU* anchors [[buffer(1)]],
+    device NMSutureLoopGPU* loops [[buffer(2)]],
+    device float4* forces [[buffer(3)]],
+    constant uint4& counts [[buffer(4)]], // nodes, anchors, loops, enabled
+    constant float& progress [[buffer(5)]],
+    uint node [[thread_position_in_grid]]) {
+    if (node>=counts.x) return;
+    float3 force(0.0f);
+    for (uint loop=0; loop<counts.z; ++loop) {
+        float3 p[4]; float3 tangent[4]; float L=0;
+        for(uint c=0;c<4;++c) p[c]=sutureCorner(nodes,anchors,counts.y,loop,c);
+        for(uint c=0;c<4;++c) { float3 e=p[(c+1)%4]-p[c]; float len=length(e); L+=len; tangent[c]=e/max(len,1e-12f); }
+        float4 material=loops[loop].material;
+        float pulled=material.w * progress;
+        float rest=max(material.x-pulled,1e-6f);
+        float extension=max(L-rest,0.0f);
+        float tension=counts.w ? material.z * extension/rest : 0.0f;
+        for(uint i=0;i<counts.y;++i) if(anchors[i].identity.x==node && anchors[i].identity.y==loop) {
+            uint c=anchors[i].identity.z;
+            force += anchors[i].weights.x * tension * (tangent[c]-tangent[(c+3)%4]);
+        }
+        if(node==0) {
+            loops[loop].state=float4(rest,material.y-rest,pulled,tension);
+            loops[loop].diagnostics=float4(L,0.5f*material.z*extension*extension/rest,L/rest,0.0f);
+        }
+    }
+    forces[node]=float4(force,0.0f);
+}
+// Material markers have fixed coordinates. Their positions move through the
+// eyelets as loop material is transferred to the pulled tail.
+kernel void nm_suture_thread_markers(
+    device const NMFEMNodeStateGPU* nodes [[buffer(0)]],
+    device const NMSutureAnchorGPU* anchors [[buffer(1)]],
+    device const NMSutureLoopGPU* loops [[buffer(2)]],
+    device float4* markers [[buffer(3)]],
+    constant uint4& counts [[buffer(4)]],
+    uint index [[thread_position_in_grid]]) {
+    const uint n=64; if(index>=counts.z*n) return;
+    uint loop=index/n, marker=index%n;
+    float3 p[4]; float len[4]; float L=0;
+    for(uint c=0;c<4;++c) p[c]=sutureCorner(nodes,anchors,counts.y,loop,c);
+    for(uint c=0;c<4;++c) {len[c]=length(p[(c+1)%4]-p[c]);L+=len[c];}
+    float materialCoordinate=loops[loop].material.y*float(marker)/float(n-1);
+    float rest=loops[loop].state.x;
+    float3 position=p[0]+float3(0,0,max(materialCoordinate-rest,0.0f));
+    if(materialCoordinate<rest) {
+        float arc=materialCoordinate * L/rest;
+        for(uint c=0;c<4;++c) {if(arc<=len[c]) {position=mix(p[c],p[(c+1)%4],arc/max(len[c],1e-12f));break;}arc-=len[c];}
+    }
+    markers[index]=float4(position,materialCoordinate);
+}
+// Exact directional derivative of the elastic line energy, assembled in the
+// same Newton/FGMRES operator as FEM. No lagged spring or position projection.
+kernel void nm_suture_thread_operator(
+    device const NMFEMNodeStateGPU* nodes [[buffer(0)]],
+    device const NMSutureAnchorGPU* anchors [[buffer(1)]],
+    device const NMSutureLoopGPU* loops [[buffer(2)]],
+    device const float4* direction [[buffer(3)]],
+    device float4* work [[buffer(4)]],
+    constant uint4& counts [[buffer(5)]],
+    constant float& dt [[buffer(6)]],
+    uint node [[thread_position_in_grid]]) {
+    if(node>=counts.x || !counts.w || nodes[node].restAndFixed.w>0.5f) return;
+    float3 derivative(0.0f);
+    for(uint loop=0;loop<counts.z;++loop) {
+        float3 p[4],dp[4],t[4],dtangent[4];float L=0,dL=0;
+        for(uint c=0;c<4;++c) {
+            p[c]=sutureCorner(nodes,anchors,counts.y,loop,c);dp[c]=float3(0);
+            for(uint i=0;i<counts.y;++i) if(anchors[i].identity.y==loop && anchors[i].identity.z==c)
+                dp[c]+=anchors[i].weights.x*direction[anchors[i].identity.x].xyz;
+        }
+        for(uint c=0;c<4;++c) {
+            float3 edge=p[(c+1)%4]-p[c],de=dp[(c+1)%4]-dp[c];float len=max(length(edge),1e-12f);
+            t[c]=edge/len;L+=len;dL+=dot(t[c],de);dtangent[c]=(de-t[c]*dot(t[c],de))/len;
+        }
+        float rest=loops[loop].state.x;
+        if(L<=rest) continue;
+        float T=loops[loop].material.z*(L-rest)/rest;
+        float dT=loops[loop].material.z*dL/rest;
+        for(uint i=0;i<counts.y;++i) if(anchors[i].identity.x==node && anchors[i].identity.y==loop) {
+            uint c=anchors[i].identity.z,prev=(c+3)%4;
+            derivative+=anchors[i].weights.x*(dT*(t[c]-t[prev])+T*(dtangent[c]-dtangent[prev]));
+        }
+    }
+    work[node].xyz-=dt*dt*derivative;
+}
+} // namespace numi_matter_metal

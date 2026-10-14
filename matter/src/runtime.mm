@@ -2,6 +2,7 @@
 #import <Metal/Metal.h>
 
 #include "numi/matter/matter.hpp"
+#include "numi/matter/suture_thread.h"
 #include "numi/matter/detail.hpp"
 #include "metalrobo/engine_types.h"
 
@@ -679,6 +680,9 @@ RuntimeDiagnostics Runtime::initialize(
             "nm_fgmres_precondition_patches",
             "nm_fgmres_precondition_coarse",
             "nm_fgmres_import_field_residual",
+            "nm_fgmres_scale_fem_mechanical_rows",
+            "nm_suture_thread_forces",
+            "nm_suture_thread_operator",
             "nm_fgmres_clear_rigid_residual",
             "nm_rigid_initialize_feasible_candidate",
             "nm_rigid_apply_candidate_solution",
@@ -1930,6 +1934,56 @@ RuntimeDiagnostics Runtime::encode(const EncodeRequest& request) {
             return diagnostics;
         }
 
+        const std::uint64_t requiredForceCount = static_cast<std::uint64_t>(state.dispatch.environmentCount) * state.dispatch.femNodeCount;
+        if ((request.femExternalForces == nullptr) != (request.femExternalForceCount == 0u) ||
+            (request.femExternalForces && request.femExternalForceCount != requiredForceCount)) {
+            diagnostics.message = "borrowed FEM force field must exactly cover cooked nodes";
+            return diagnostics;
+        }
+        id<MTLBuffer> femExternalForces = request.femExternalForces ? (__bridge id<MTLBuffer>)request.femExternalForces : state.dummy;
+        const std::uint32_t hasFEMExternalForces = request.femExternalForces ? 1u : 0u;
+        const bool hasSuture = request.sutureLoops != nullptr;
+        id<MTLBuffer> sutureAnchors = (__bridge id<MTLBuffer>)request.sutureAnchors;
+        id<MTLBuffer> sutureLoops = (__bridge id<MTLBuffer>)request.sutureLoops;
+        const nm_uint4 sutureCounts{state.dispatch.femNodeCount,request.sutureAnchorCount,request.sutureLoopCount,request.sutureForceEnabled?1u:0u};
+        if ((hasSuture || request.sutureAnchors || request.sutureLoopCount || request.sutureAnchorCount) &&
+            (!hasSuture || !sutureAnchors || !hasFEMExternalForces || state.dispatch.environmentCount!=1u ||
+             request.sutureLoopCount==0u || request.sutureLoopCount>16u || request.sutureAnchorCount==0u || request.sutureAnchorCount>4096u ||
+             !std::isfinite(request.suturePullProgress) || request.suturePullProgress<0 || request.suturePullProgress>1 ||
+             sutureAnchors.length<request.sutureAnchorCount*sizeof(NMSutureAnchorGPU) || sutureLoops.length<request.sutureLoopCount*sizeof(NMSutureLoopGPU) ||
+             sutureAnchors.device.registryID!=state.device.registryID || sutureLoops.device.registryID!=state.device.registryID)) {
+            diagnostics.message="invalid borrowed suture eyelet buffers or progress"; return diagnostics;
+        }
+
+        if(hasSuture) {
+            const auto* anchors=static_cast<const NMSutureAnchorGPU*>(sutureAnchors.contents);
+            const auto* loops=static_cast<const NMSutureLoopGPU*>(sutureLoops.contents);
+            if(!anchors || !loops) {diagnostics.message="suture topology/material buffers must be CPU visible";return diagnostics;}
+            std::array<double,64> sums{};
+            for(std::uint32_t i=0;i<request.sutureAnchorCount;++i) {
+                const auto a=anchors[i];
+                if(a.identity.x>=sutureCounts.x || a.identity.y>=sutureCounts.z || a.identity.z>=4u || a.identity.w!=0u ||
+                    !std::isfinite(a.weights.x) || !(a.weights.x>0) || a.weights.x>1) {
+                    diagnostics.message="invalid suture tissue anchor";return diagnostics;
+                }
+                sums[a.identity.y*4+a.identity.z]+=a.weights.x;
+            }
+            for(std::uint32_t i=0;i<request.sutureLoopCount;++i) {
+                const auto m=loops[i].material;
+                if(!std::isfinite(m.x) || !std::isfinite(m.y) || !std::isfinite(m.z) || !std::isfinite(m.w) ||
+                   !(m.x>0) || m.y<m.x || m.z<0 || m.w<0 || m.w>=m.x) {
+                    diagnostics.message="invalid suture material length/stiffness/pull";return diagnostics;
+                }
+                for(unsigned c=0;c<4;++c) if(std::abs(sums[i*4+c]-1)>1e-6) {
+                    diagnostics.message="suture corner weights must sum to one";return diagnostics;
+                }
+            }
+        }
+        if (hasFEMExternalForces && (femExternalForces.length < requiredForceCount * sizeof(nm_float4) ||
+            femExternalForces.device.registryID != state.device.registryID)) {
+            diagnostics.message = "borrowed FEM force field has wrong buffer capacity or device";
+            return diagnostics;
+        }
         id<MTLCommandBuffer> commandBuffer =
             (__bridge id<MTLCommandBuffer>)request.commandBuffer;
         if (commandBuffer.commandQueue == nil ||
@@ -3460,6 +3514,14 @@ RuntimeDiagnostics Runtime::encode(const EncodeRequest& request) {
                 [encoder setBuffer:state.learnedLayers offset:0u atIndex:17u];
                 [encoder setBuffer:state.learnedWeightsCandidate offset:0u atIndex:18u];
             });
+            if(hasSuture) dispatchThreads("nm_suture_thread_forces", femNodeTotal, [&] {
+                [encoder setBuffer:state.femCandidate offset:0u atIndex:0u];
+                [encoder setBuffer:sutureAnchors offset:0u atIndex:1u];
+                [encoder setBuffer:sutureLoops offset:0u atIndex:2u];
+                [encoder setBuffer:femExternalForces offset:0u atIndex:3u];
+                [encoder setBytes:&sutureCounts length:sizeof(sutureCounts) atIndex:4u];
+                [encoder setBytes:&request.suturePullProgress length:sizeof(float) atIndex:5u];
+            });
             dispatchThreads("nm_fem_build_mechanical_residual", femNodeTotal, [&] {
                 const std::uint32_t preserveSolution = 0u;
                 setDispatch();
@@ -3484,6 +3546,8 @@ RuntimeDiagnostics Runtime::encode(const EncodeRequest& request) {
                 [encoder setBuffer:state.femFieldsCandidate offset:0u atIndex:19u];
                 [encoder setBytes:&preserveSolution
                            length:sizeof(preserveSolution) atIndex:20u];
+                [encoder setBuffer:femExternalForces offset:0u atIndex:21u];
+                [encoder setBytes:&hasFEMExternalForces length:sizeof(hasFEMExternalForces) atIndex:22u];
             });
             dispatchThreads("nm_fgmres_clear_rigid_residual",
                 rigidGeneralizedTotalForResidual, [&] {
@@ -3585,6 +3649,12 @@ RuntimeDiagnostics Runtime::encode(const EncodeRequest& request) {
             dispatchThreads("nm_fgmres_import_field_residual", femNodeTotal, [&] {
                 setDispatch();
                 [encoder setBuffer:state.mixedFieldResidual offset:0u atIndex:1u];
+                [encoder setBuffer:state.femResidual offset:0u atIndex:2u];
+            });
+
+            dispatchThreads("nm_fgmres_scale_fem_mechanical_rows", femNodeTotal, [&] {
+                setDispatch();
+                [encoder setBuffer:state.mixedSolver offset:0u atIndex:1u];
                 [encoder setBuffer:state.femResidual offset:0u atIndex:2u];
             });
 
@@ -3692,6 +3762,8 @@ RuntimeDiagnostics Runtime::encode(const EncodeRequest& request) {
                              offset:0u atIndex:20u];
                 [encoder setBuffer:state.mixedMaterials
                              offset:0u atIndex:21u];
+                [encoder setBuffer:femExternalForces offset:0u atIndex:22u];
+                [encoder setBytes:&hasFEMExternalForces length:sizeof(hasFEMExternalForces) atIndex:23u];
             });
             dispatchThreads("nm_fgmres_build_preconditioner", femNodeTotal, [&] {
                 setDispatch();
@@ -4184,6 +4256,21 @@ RuntimeDiagnostics Runtime::encode(const EncodeRequest& request) {
                     [encoder setBuffer:state.coupledPointJacobians
                                  offset:0u atIndex:6u];
                 });
+
+                if(hasSuture) dispatchThreads("nm_suture_thread_operator", femNodeTotal, [&] {
+                    [encoder setBuffer:state.femCandidate offset:0u atIndex:0u];
+                    [encoder setBuffer:sutureAnchors offset:0u atIndex:1u];
+                    [encoder setBuffer:sutureLoops offset:0u atIndex:2u];
+                    [encoder setBuffer:state.fgmresPreconditionedBasis offset:columnOffset atIndex:3u];
+                    [encoder setBuffer:state.femOperatorValue offset:0u atIndex:4u];
+                    [encoder setBytes:&sutureCounts length:sizeof(sutureCounts) atIndex:5u];
+                    [encoder setBytes:&state.dispatch.gravityAndTimestep.w length:sizeof(float) atIndex:6u];
+                });
+                dispatchThreads("nm_fgmres_scale_fem_mechanical_rows", femNodeTotal, [&] {
+                    setDispatch();
+                    [encoder setBuffer:state.mixedSolver offset:0u atIndex:1u];
+                    [encoder setBuffer:state.femOperatorValue offset:0u atIndex:2u];
+                });
                 dispatchGroups32(
                     "nm_fgmres_orthogonalize_and_finish_column",
                     environments,
@@ -4618,6 +4705,14 @@ RuntimeDiagnostics Runtime::encode(const EncodeRequest& request) {
                 [encoder setBuffer:state.learnedLayers offset:0u atIndex:17u];
                 [encoder setBuffer:state.learnedWeightsCandidate offset:0u atIndex:18u];
             });
+            if(hasSuture) dispatchThreads("nm_suture_thread_forces", femNodeTotal, [&] {
+                [encoder setBuffer:state.femCandidate offset:0u atIndex:0u];
+                [encoder setBuffer:sutureAnchors offset:0u atIndex:1u];
+                [encoder setBuffer:sutureLoops offset:0u atIndex:2u];
+                [encoder setBuffer:femExternalForces offset:0u atIndex:3u];
+                [encoder setBytes:&sutureCounts length:sizeof(sutureCounts) atIndex:4u];
+                [encoder setBytes:&request.suturePullProgress length:sizeof(float) atIndex:5u];
+            });
             dispatchThreads("nm_fem_build_mechanical_residual", femNodeTotal, [&] {
                 const std::uint32_t preserveSolution = 1u;
                 setDispatch();
@@ -4642,6 +4737,8 @@ RuntimeDiagnostics Runtime::encode(const EncodeRequest& request) {
                 [encoder setBuffer:state.femFieldsCandidate offset:0u atIndex:19u];
                 [encoder setBytes:&preserveSolution
                            length:sizeof(preserveSolution) atIndex:20u];
+                [encoder setBuffer:femExternalForces offset:0u atIndex:21u];
+                [encoder setBytes:&hasFEMExternalForces length:sizeof(hasFEMExternalForces) atIndex:22u];
             });
             if (!encodeCoupledPrimalContact(
                     true,
@@ -4815,6 +4912,12 @@ RuntimeDiagnostics Runtime::encode(const EncodeRequest& request) {
                 [encoder setBuffer:state.femMaterialStateAccepted offset:0u atIndex:11u];
                 [encoder setBuffer:state.femMaterialStateCandidate offset:0u atIndex:12u];
                 [encoder setBuffer:state.statuses offset:0u atIndex:13u];
+            });
+
+            dispatchThreads("nm_fgmres_scale_fem_mechanical_rows", femNodeTotal, [&] {
+                setDispatch();
+                [encoder setBuffer:state.mixedSolver offset:0u atIndex:1u];
+                [encoder setBuffer:state.femResidual offset:0u atIndex:2u];
             });
             dispatchGroups32("nm_mixed_certify", objectTotal, [&] {
                 setDispatch();
@@ -6120,6 +6223,10 @@ RuntimeStateSnapshot Runtime::snapshot() const {
         snapshot.available = true;
     }
     return snapshot;
+}
+
+void* Runtime::acceptedFEMNodeBuffer() const noexcept {
+    return state_ ? (__bridge void*)state_->femAccepted : nullptr;
 }
 
 void* Runtime::eventBuffer() const noexcept {

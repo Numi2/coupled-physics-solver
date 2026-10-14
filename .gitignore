@@ -3,3 +3,5 @@
 /.numi/runs/
 *.trace
 *.gputrace
+__pycache__/
+*.pyc
