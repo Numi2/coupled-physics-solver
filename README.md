@@ -10,6 +10,8 @@ compiler/runtime, surgical tissue and suture mechanics, and executable physics
 probes. It includes a small native viewer for the skin stitch bench. It does not
 contain training, MLX, or unrelated robot products. See [PROVENANCE.md](PROVENANCE.md) for the exact source revision.
 
+[Numi Lab branch history and recovery](docs/NumiLabMigration/README.md)
+
 ## Skin suture entry point
 
 Run **`./suture`** to build, simulate and view the Metal prethreaded skin closure
